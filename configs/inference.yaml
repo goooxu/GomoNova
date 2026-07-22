@@ -1,10 +1,10 @@
 _base_: base.yaml
 
 model:
-  channels: 128
-  num_blocks: 12
-  policy_channels: 64
-  value_channels: 32
+  channels: 96
+  num_blocks: 8
+  policy_channels: 48
+  value_channels: 24
 
 inference:
   temperature: 0.0

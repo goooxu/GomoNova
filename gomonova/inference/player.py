@@ -27,8 +27,9 @@ class InferencePlayer:
     def get_policy(self, board: Board) -> np.ndarray:
         planes = board_to_planes(board)
         x = torch.from_numpy(planes).unsqueeze(0).to(self.device)
-        logits, value = self.network(x)
-        policy = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
+            logits, value = self.network(x)
+        policy = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
         return policy
 
     @torch.no_grad()
@@ -36,8 +37,9 @@ class InferencePlayer:
         """Returns (move, full_policy, value)."""
         planes = board_to_planes(board)
         x = torch.from_numpy(planes).unsqueeze(0).to(self.device)
-        logits, value = self.network(x)
-        policy = torch.softmax(logits, dim=1).cpu().numpy()[0]
+        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16):
+            logits, value = self.network(x)
+        policy = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
         v = value.item()
 
         moves = board.legal_moves()

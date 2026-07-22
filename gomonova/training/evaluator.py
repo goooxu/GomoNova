@@ -39,9 +39,9 @@ def _batch_move(network: torch.nn.Module, boards: list[Board], device: torch.dev
     if not boards:
         return []
     planes = np.stack([board_to_planes(b) for b in boards])
-    x = torch.from_numpy(planes).to(device)
+    x = torch.from_numpy(planes).to(device=device, dtype=torch.bfloat16)
     logits, _ = network(x)
-    policies = torch.softmax(logits, dim=1).cpu().numpy()
+    policies = torch.softmax(logits, dim=1).cpu().float().numpy()
 
     moves = []
     for i, board in enumerate(boards):

@@ -19,7 +19,8 @@ from .trainer import Trainer
 def run_pipeline(config_path: str) -> None:
     cfg = load_config(config_path)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Device: {device}")
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    print(f"Device: {device}, GPUs: {num_gpus}")
 
     model_cfg = cfg["model"]
     train_cfg = cfg["training"]
@@ -32,15 +33,21 @@ def run_pipeline(config_path: str) -> None:
         num_blocks=model_cfg["num_blocks"],
         policy_channels=model_cfg["policy_channels"],
         value_channels=model_cfg["value_channels"],
-    ).to(device)
-    print(f"Model params: {network.num_params():,}")
+    ).bfloat16().to(device)
+    for m in network.modules():
+        if isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
+            m.float()
+    print(f"Model params: {network.num_params():,} (BF16 weights, BN=FP32)")
 
     best_network = GomoNovaNet(
         channels=model_cfg["channels"],
         num_blocks=model_cfg["num_blocks"],
         policy_channels=model_cfg["policy_channels"],
         value_channels=model_cfg["value_channels"],
-    ).to(device)
+    ).bfloat16().to(device)
+    for m in best_network.modules():
+        if isinstance(m, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
+            m.float()
 
     ckpt_dir = cfg.get("checkpoint_dir", "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -52,7 +59,14 @@ def run_pipeline(config_path: str) -> None:
         load_checkpoint(best_path, best_network, device)
         print(f"Resumed from iteration {start_iter}")
 
-    best_network.load_state_dict(network.state_dict())
+    # Wrap in DataParallel after loading checkpoint
+    # Note: DataParallel is incompatible with BF16 master weights.
+    # Single GPU is sufficient for this model size (12.5M params).
+
+    def _raw_model(net):
+        return net.module if isinstance(net, torch.nn.DataParallel) else net
+
+    best_network.load_state_dict(_raw_model(network).state_dict())
 
     trainer = Trainer(
         network, device,
@@ -99,12 +113,12 @@ def run_pipeline(config_path: str) -> None:
 
         promoted = result["winrate"] >= eval_cfg["promote_winrate"]
         if promoted:
-            best_network.load_state_dict(network.state_dict())
-            save_checkpoint(best_path, network, trainer.optimizer, iteration + 1)
+            best_network.load_state_dict(_raw_model(network).state_dict())
+            save_checkpoint(best_path, _raw_model(network), trainer.optimizer, iteration + 1)
 
         if (iteration + 1) % 100 == 0:
             path = os.path.join(ckpt_dir, f"model_{iteration+1:04d}.pt")
-            save_checkpoint(path, network, trainer.optimizer, iteration + 1)
+            save_checkpoint(path, _raw_model(network), trainer.optimizer, iteration + 1)
 
         print(
             f"Iter {iteration+1}/{total_iters} | "

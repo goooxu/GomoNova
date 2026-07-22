@@ -74,9 +74,9 @@ def play_games_fast(
             # Batch evaluate all active boards
             active_boards = [boards[i] for i in active]
             planes = np.stack([board_to_planes(b) for b in active_boards])
-            x = torch.from_numpy(planes).to(device)
+            x = torch.from_numpy(planes).to(device=device, dtype=torch.bfloat16)
             logits, _ = network(x)
-            policies = torch.softmax(logits, dim=1).cpu().numpy()
+            policies = torch.softmax(logits, dim=1).cpu().float().numpy()
 
             # Select moves
             next_active = []

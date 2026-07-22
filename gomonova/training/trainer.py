@@ -1,4 +1,4 @@
-"""Neural network trainer: REINFORCE policy gradient + value MSE + AMP."""
+"""Neural network trainer: outcome-weighted CE + value MSE, BF16 mixed precision."""
 
 from __future__ import annotations
 
@@ -36,7 +36,6 @@ class Trainer:
         self.optimizer = torch.optim.AdamW(
             network.parameters(), lr=lr, weight_decay=weight_decay
         )
-        self.scaler = torch.amp.GradScaler(device.type, enabled=self.use_amp)
 
     def get_lr(self, iteration: int) -> float:
         if iteration < self.warmup_iters:
@@ -57,17 +56,15 @@ class Trainer:
         outcome_values = torch.from_numpy(outcomes).to(self.device)
 
         self.optimizer.zero_grad()
-        with torch.amp.autocast(self.device.type, enabled=self.use_amp):
+        with torch.amp.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
             logits, value_pred = self.network(x)
             loss, p_loss, v_loss = total_loss(
                 logits, value_pred, move_indices, outcome_values, self.network
             )
 
-        self.scaler.scale(loss).backward()
-        self.scaler.unscale_(self.optimizer)
+        loss.backward()
         nn.utils.clip_grad_norm_(self.network.parameters(), self.grad_clip)
-        self.scaler.step(self.optimizer)
-        self.scaler.update()
+        self.optimizer.step()
 
         return loss.item(), p_loss.item(), v_loss.item()
 
