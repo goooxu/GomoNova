@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gomonova"
+version = "0.1.0"
+description = "GomoNova - Gomoku AI trained from scratch via self-play RL"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+    "rich>=13.0",
+    "click>=8.0",
+    "tensorboard>=2.14",
+]
+
+[project.scripts]
+gomonova = "gomonova.cli.play:main"
+
+[tool.setuptools.packages.find]
+include = ["gomonova*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

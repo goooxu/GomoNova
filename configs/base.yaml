@@ -1,0 +1,2 @@
+board_size: 15
+game_rules: renju  # renju (black has forbidden moves) or freestyle

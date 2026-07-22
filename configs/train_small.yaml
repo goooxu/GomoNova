@@ -1,0 +1,35 @@
+_base_: base.yaml
+
+model:
+  channels: 96
+  num_blocks: 8
+  policy_channels: 48
+  value_channels: 24
+
+training:
+  batch_size: 512
+  lr: 2.0e-3
+  lr_min: 1.0e-4
+  warmup_iters: 3
+  total_iters: 50
+  train_steps_per_iter: 256
+  weight_decay: 1.0e-4
+  grad_clip: 1.0
+  use_amp: true
+
+selfplay:
+  games_per_iter: 64
+  mcts_simulations: 200
+  c_puct: 2.0
+  dirichlet_alpha: 0.3
+  dirichlet_epsilon: 0.25
+  temp_threshold: 30
+  resign_value: -0.9
+  resign_plies: 8
+
+replay:
+  capacity: 200000
+
+eval:
+  games: 40
+  promote_winrate: 0.55
