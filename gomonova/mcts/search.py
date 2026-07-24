@@ -61,8 +61,9 @@ class MCTSSearch:
     @torch.no_grad()
     def _evaluate(self, board: Board) -> tuple[np.ndarray, float]:
         planes = board_to_planes(board)
+        dtype = next(self.network.parameters()).dtype
         x = torch.from_numpy(planes).unsqueeze(0).to(
-            device=self.device, dtype=torch.bfloat16
+            device=self.device, dtype=dtype
         )
         policy_logits, value = self.network(x)
         policy = torch.softmax(policy_logits.float(), dim=1).cpu().numpy()[0]

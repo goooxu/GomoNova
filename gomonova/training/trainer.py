@@ -51,7 +51,9 @@ class Trainer:
 
     def train_step(self, replay: ReplayBuffer, batch_size: int) -> tuple[float, float, float]:
         planes, moves, outcomes, mcts_pol = replay.sample(batch_size)
-        x = torch.from_numpy(planes).to(self.device)
+        net = self.network.module if hasattr(self.network, "module") else self.network
+        dtype = next(net.parameters()).dtype
+        x = torch.from_numpy(planes).to(device=self.device, dtype=dtype)
         move_indices = torch.from_numpy(moves).to(self.device)
         outcome_values = torch.from_numpy(outcomes).to(self.device)
         mcts_tensor = torch.from_numpy(mcts_pol).to(self.device)

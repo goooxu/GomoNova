@@ -55,6 +55,10 @@ def _get_legal_mask(board: Board) -> np.ndarray:
 # Pure-policy self-play (Phase 1: fast warmup)
 # ---------------------------------------------------------------------------
 
+def _net_dtype(network: torch.nn.Module) -> torch.dtype:
+    return next(network.parameters()).dtype
+
+
 @torch.no_grad()
 def play_games_fast(
     network: torch.nn.Module,
@@ -66,6 +70,7 @@ def play_games_fast(
 ) -> list[dict]:
     """Play games using policy network only. Returns game records."""
     network.eval()
+    dtype = _net_dtype(network)
     records = []
     games_remaining = num_games
 
@@ -80,7 +85,7 @@ def play_games_fast(
         while active:
             active_boards = [boards[i] for i in active]
             planes = np.stack([board_to_planes(b) for b in active_boards])
-            x = torch.from_numpy(planes).to(device=device, dtype=torch.bfloat16)
+            x = torch.from_numpy(planes).to(device=device, dtype=dtype)
             logits, _ = network(x)
             policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
 
@@ -138,6 +143,7 @@ def play_games_with_mcts(
 ) -> list[dict]:
     """Play games with MCTS for opening moves, pure policy for the rest."""
     network.eval()
+    dtype = _net_dtype(network)
     records = []
 
     for game_idx in range(num_games):
@@ -167,7 +173,7 @@ def play_games_with_mcts(
 
             planes_snapshot = board_to_planes(board)
             x = torch.from_numpy(planes_snapshot).unsqueeze(0).to(
-                device=device, dtype=torch.bfloat16
+                device=device, dtype=dtype
             )
             logits, _ = network(x)
             policy = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
