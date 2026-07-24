@@ -12,7 +12,7 @@ training:
   lr_min: 1.0e-6
   warmup_iters: 50
   total_iters: 3000
-  train_steps_per_iter: 64
+  train_steps_per_iter: 32
   weight_decay: 1.0e-4
   grad_clip: 1.0
   use_amp: true
@@ -21,7 +21,7 @@ selfplay:
   games_per_iter: 512
   temp_threshold: 20
   mcts_sims: 25
-  mcts_moves: 10
+  mcts_moves: 5
   dirichlet_alpha: 0.3
   history_opponent_ratio: 0.5
   history_save_interval: 200
@@ -35,5 +35,5 @@ eval:
   promote_winrate: 0.55
 
 phases:
-  mcts_start: 500
-  renju_start: 2200
+  mcts_start: 300
+  renju_start: 2400
