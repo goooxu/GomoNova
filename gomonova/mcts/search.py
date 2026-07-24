@@ -73,7 +73,22 @@ class MCTSSearch:
     def _get_legal_actions(self, board: Board) -> np.ndarray:
         moves = board.legal_moves()
         if self.use_renju and board.current == BLACK:
-            legal = np.array([m for m in moves if is_legal(board, int(m))], dtype=np.int64)
+            occupied = np.argwhere(board.cells != 0)
+            if len(occupied) > 0:
+                candidate_set: set[int] = set()
+                for r, c in occupied:
+                    for dr in range(-2, 3):
+                        for dc in range(-2, 3):
+                            nr, nc = r + dr, c + dc
+                            if (0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE
+                                    and board.cells[nr, nc] == 0):
+                                candidate_set.add(nr * BOARD_SIZE + nc)
+                candidates = np.array(sorted(candidate_set), dtype=np.int64)
+            else:
+                candidates = moves
+            legal = np.array(
+                [m for m in candidates if is_legal(board, int(m))], dtype=np.int64
+            )
             if len(legal) == 0:
                 return moves
             return legal

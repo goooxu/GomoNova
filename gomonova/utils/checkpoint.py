@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -12,6 +14,9 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer | None = None,
     iteration: int = 0,
 ) -> None:
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     state = {
         "network": network.state_dict(),
         "iteration": iteration,
