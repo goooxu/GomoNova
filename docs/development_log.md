@@ -223,3 +223,83 @@ python -m gomonova.cli.play --checkpoint checkpoints/best.pt
 ```bash
 python -m pytest tests/ -v
 ```
+
+---
+
+## V2 棋力提升改造
+
+### 改造目标
+
+将棋力从「初学者」提升到「能赢业余高手」，核心约束：
+- 推理时 100% 纯模型输出（无搜索、无禁手过滤、无任何规则干预）
+- 训练时允许使用 MCTS 等搜索算法
+- 不使用棋谱、开源五子棋模型结构、预训练权重
+
+### 架构改动
+
+#### 模型扩容（12.5M → ~50M）
+- channels: 96 → 192, num_blocks: 8 → 10
+- policy_channels: 48 → 96, value_channels: 24 → 48
+- Policy head 全局门控从标量改为逐位置（Conv1x1 产生 15×15 sigmoid 门）
+- Value head 隐层从 128 扩到 256
+
+#### 输入编码增强（8 → 16 通道）
+- 通道 0-1：当前方/对方棋子
+- 通道 2-7：当前方最近 6 手（原为 2 手）
+- 通道 8-13：对方最近 6 手
+- 通道 14：占位 | 通道 15：回合偏置
+
+### 训练方法改动
+
+#### MCTS 引导训练（核心改动）
+- 重新启用 MCTS（`mcts/search.py`），添加 `use_renju` 参数支持自由/连珠规则
+- 选择性 MCTS：仅对每局前 N 手使用 MCTS（默认 10 手），后续用纯策略
+- 训练目标从「单个走法 + 交叉熵」升级为「MCTS 访问分布 + KL 散度」
+- MCTS 步：`L = KL(mcts_policy ∥ network_policy)`
+- 纯策略步：`L = outcome_weighted_CE(played_move)`（保持原有方式）
+
+#### 三阶段训练
+| 阶段 | 迭代 | MCTS | 规则 | 目的 |
+|------|------|------|------|------|
+| 1 热身 | 0-500 | ❌ | 自由 | 快速建立基本棋感 |
+| 2 主力 | 500-2200 | ✅ 25 sims | 自由 | MCTS 引导学习战略 |
+| 3 禁手 | 2200-3000 | ✅ 25 sims | 连珠 | 学会避免/利用禁手 |
+
+#### 多 GPU DDP 训练
+- 支持 `torchrun --nproc_per_node=4` 启动
+- 每进程独立跑自博弈，训练时 DDP 同步梯度
+- 评估仅在 rank 0 执行
+- 单 GPU 也兼容（不用 torchrun 启动即可）
+
+#### 对手多样性
+- 每 200 轮保存历史 checkpoint，保留最近 10 个
+- 50% 对局 vs 随机历史 checkpoint，防止策略循环
+
+#### Replay Buffer 改造
+- 预分配 numpy 数组替代 Python list（消除碎片化）
+- 支持存储 MCTS 策略分布：`(planes, mcts_policy, move, outcome)`
+
+### 推理层改动
+- 移除黑棋禁手过滤（`is_legal` 屏蔽逻辑）
+- 模型输出 → softmax → 仅屏蔽已占位置 → argmax → 直接落子
+- 已占位置屏蔽是物理约束，不是规则干预
+
+### 配置变更
+```yaml
+model: { channels: 192, num_blocks: 10, policy_channels: 96, value_channels: 48 }
+training: { batch_size: 2048, lr: 1e-4, total_iters: 3000, train_steps_per_iter: 64 }
+selfplay: { games_per_iter: 512, mcts_sims: 25, mcts_moves: 10 }
+phases: { mcts_start: 500, renju_start: 2200 }
+```
+
+### 训练命令
+```bash
+# 单 GPU
+python scripts/train.py --config configs/train_main.yaml
+
+# 4 GPU DDP
+torchrun --nproc_per_node=4 scripts/train.py --config configs/train_main.yaml
+
+# 或使用 Makefile
+make train-ddp NGPU=4
+```

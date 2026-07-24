@@ -19,11 +19,13 @@ training:
 
 selfplay:
   games_per_iter: 4
-  mcts_simulations: 50
-  c_puct: 2.0
-  dirichlet_alpha: 0.3
-  dirichlet_epsilon: 0.25
   temp_threshold: 10
+  mcts_sims: 5
+  mcts_moves: 3
+  dirichlet_alpha: 0.3
+  history_opponent_ratio: 0.0
+  history_save_interval: 100
+  history_keep: 2
 
 replay:
   capacity: 10000
@@ -31,3 +33,7 @@ replay:
 eval:
   games: 4
   promote_winrate: 0.55
+
+phases:
+  mcts_start: 1
+  renju_start: 100

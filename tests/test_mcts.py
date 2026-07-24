@@ -125,7 +125,7 @@ class TestMCTSSearch:
         assert abs(policy.sum() - 1.0) < 1e-5
 
     def test_forbidden_moves_excluded(self, search):
-        """MCTS for Black should not select forbidden moves."""
+        """MCTS for Black should not select forbidden moves (Renju mode)."""
         b = Board()
         b.cells[7, 2] = BLACK
         b.cells[7, 3] = BLACK
@@ -140,3 +140,26 @@ class TestMCTSSearch:
         legal = search._get_legal_actions(b)
         forbidden_pos = rc_to_pos(7, 5)
         assert forbidden_pos not in legal
+
+    def test_freestyle_allows_all_empty(self, net):
+        """Freestyle MCTS should allow all empty positions."""
+        fs_search = MCTSSearch(net, torch.device("cpu"), num_simulations=10, use_renju=False)
+        b = Board()
+        b.play(rc_to_pos(7, 7))
+        b.play(rc_to_pos(7, 8))
+        legal = fs_search._get_legal_actions(b)
+        assert len(legal) == 223  # 225 - 2 occupied
+
+    def test_freestyle_winner_detection(self, net):
+        """Freestyle: 5+ in a row wins for both colors."""
+        fs_search = MCTSSearch(net, torch.device("cpu"), num_simulations=10, use_renju=False)
+        b = Board()
+        b.cells[7, 3] = WHITE
+        b.cells[7, 4] = WHITE
+        b.cells[7, 5] = WHITE
+        b.cells[7, 6] = WHITE
+        b.cells[7, 7] = WHITE
+        b.history = [rc_to_pos(7, 3), rc_to_pos(7, 4), rc_to_pos(7, 5),
+                     rc_to_pos(7, 6), rc_to_pos(7, 7)]
+        winner = fs_search._check_winner(b, rc_to_pos(7, 7))
+        assert winner == WHITE

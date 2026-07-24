@@ -1,9 +1,9 @@
 """GomoNovaNet: Multi-Scale Attentive Residual Network for Gomoku.
 
 Architecture:
-  Stem (Conv 8->C) + positional encoding
+  Stem (Conv 16->C) + positional encoding
   -> N x MSARBlock
-  -> Policy head (local logits + global-context gate -> 225 logits)
+  -> Policy head (local logits + per-position gated global context -> 225 logits)
   -> Value head (scalar in [-1, 1])
 """
 
@@ -14,17 +14,16 @@ import torch.nn as nn
 
 from ..game.board import BOARD_SIZE, NUM_CELLS
 from .blocks import MSARBlock
-
-INPUT_CHANNELS = 8
+from .encoder import INPUT_CHANNELS
 
 
 class GomoNovaNet(nn.Module):
     def __init__(
         self,
-        channels: int = 128,
-        num_blocks: int = 12,
-        policy_channels: int = 64,
-        value_channels: int = 32,
+        channels: int = 192,
+        num_blocks: int = 10,
+        policy_channels: int = 96,
+        value_channels: int = 48,
         se_reduction: int = 4,
     ):
         super().__init__()
@@ -48,11 +47,11 @@ class GomoNovaNet(nn.Module):
         )
         self.policy_local = nn.Conv2d(policy_channels, 1, 1)
         self.policy_global = nn.Sequential(
-            nn.Linear(policy_channels, 128),
+            nn.Linear(policy_channels, 256),
             nn.Mish(inplace=True),
-            nn.Linear(128, NUM_CELLS),
+            nn.Linear(256, NUM_CELLS),
         )
-        self.policy_gate = nn.Linear(policy_channels, 1)
+        self.policy_gate = nn.Conv2d(policy_channels, 1, 1)
 
         self.value_head = nn.Sequential(
             nn.BatchNorm2d(channels),
@@ -60,9 +59,9 @@ class GomoNovaNet(nn.Module):
             nn.Conv2d(channels, value_channels, 1, bias=False),
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
-            nn.Linear(value_channels, 128),
+            nn.Linear(value_channels, 256),
             nn.Mish(inplace=True),
-            nn.Linear(128, 1),
+            nn.Linear(256, 1),
             nn.Tanh(),
         )
 
@@ -75,7 +74,7 @@ class GomoNovaNet(nn.Module):
         local_logits = self.policy_local(p).flatten(1)
         gap = p.mean(dim=(2, 3))
         global_bias = self.policy_global(gap)
-        gate = torch.sigmoid(self.policy_gate(gap))
+        gate = torch.sigmoid(self.policy_gate(p).flatten(1))
         policy_logits = local_logits + gate * global_bias
 
         value = self.value_head(h)

@@ -1,9 +1,12 @@
-"""Fast self-play via policy network (no MCTS).
+"""Self-play with optional MCTS guidance for training.
 
-Games are played using the policy network directly with temperature
-sampling.  Training uses REINFORCE for policy and MSE for value.
-This is orders of magnitude faster than MCTS-based self-play while
-still learning purely from game rules.
+Supports two modes:
+  - Pure policy: fast lockstep batched games (Phase 1 warmup)
+  - MCTS-guided: MCTS for opening moves, pure policy for rest (Phase 2/3)
+
+Training targets:
+  - MCTS moves: visit distribution (KL divergence loss)
+  - Pure-policy moves: played move (outcome-weighted CE loss)
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ import torch
 
 from ..game.board import BLACK, WHITE, BOARD_SIZE, Board, pos_to_rc
 from ..game.symmetry import NUM_TRANSFORMS, transform_board, transform_policy
+from ..mcts.search import MCTSSearch
 from ..nn.encoder import board_to_planes
 
 _DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
@@ -42,11 +46,14 @@ def _check_winner_freestyle(board: Board, pos: int) -> int | None:
 
 
 def _get_legal_mask(board: Board) -> np.ndarray:
-    """Training uses freestyle rules (no forbidden moves) for speed."""
     mask = np.zeros(225, dtype=np.float32)
     mask[board.legal_moves()] = 1.0
     return mask
 
+
+# ---------------------------------------------------------------------------
+# Pure-policy self-play (Phase 1: fast warmup)
+# ---------------------------------------------------------------------------
 
 @torch.no_grad()
 def play_games_fast(
@@ -67,18 +74,16 @@ def play_games_fast(
         games_remaining -= n
 
         boards = [Board() for _ in range(n)]
-        histories: list[list[tuple[np.ndarray, np.ndarray, int]]] = [[] for _ in range(n)]
+        histories: list[list[tuple]] = [[] for _ in range(n)]
         active = list(range(n))
 
         while active:
-            # Batch evaluate all active boards
             active_boards = [boards[i] for i in active]
             planes = np.stack([board_to_planes(b) for b in active_boards])
             x = torch.from_numpy(planes).to(device=device, dtype=torch.bfloat16)
             logits, _ = network(x)
-            policies = torch.softmax(logits, dim=1).cpu().float().numpy()
+            policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
 
-            # Select moves
             next_active = []
             for idx, game_idx in enumerate(active):
                 board = boards[game_idx]
@@ -94,14 +99,11 @@ def play_games_fast(
                     masked_policy[legal_mask > 0] = 1.0 / legal_mask.sum()
 
                 planes_snapshot = board_to_planes(board)
-                histories[game_idx].append((planes_snapshot, masked_policy.copy(), board.current))
-
-                if temp < 1e-8:
-                    move = int(np.argmax(masked_policy))
-                else:
-                    tempered = masked_policy ** (1.0 / temp)
-                    tempered /= tempered.sum()
-                    move = int(np.random.choice(225, p=tempered))
+                move = _sample_move(masked_policy, temp)
+                # (planes, mcts_policy, move, player)
+                histories[game_idx].append(
+                    (planes_snapshot, None, move, board.current)
+                )
 
                 board.play(move)
                 winner = _check_winner_freestyle(board, move)
@@ -119,46 +121,168 @@ def play_games_fast(
     return records
 
 
+# ---------------------------------------------------------------------------
+# MCTS-guided self-play (Phase 2/3)
+# ---------------------------------------------------------------------------
+
+@torch.no_grad()
+def play_games_with_mcts(
+    network: torch.nn.Module,
+    device: torch.device,
+    num_games: int,
+    mcts_searcher: MCTSSearch,
+    mcts_moves: int = 10,
+    temperature: float = 1.0,
+    temp_decay_move: int = 20,
+    batch_size: int = 256,
+) -> list[dict]:
+    """Play games with MCTS for opening moves, pure policy for the rest."""
+    network.eval()
+    records = []
+
+    for game_idx in range(num_games):
+        board = Board()
+        history: list[tuple] = []
+        result = None
+
+        # Phase A: MCTS moves (sequential per game)
+        for move_num in range(mcts_moves):
+            if result is not None:
+                break
+            temp = temperature if move_num < temp_decay_move else 0.1
+            planes_snapshot = board_to_planes(board)
+            move, mcts_policy = mcts_searcher.get_move(board, temperature=temp)
+            history.append((planes_snapshot, mcts_policy, move, board.current))
+            board.play(move)
+            winner = mcts_searcher._check_winner(board, move)
+            if winner is not None:
+                result = 1.0 if winner == BLACK else -1.0
+            elif board.is_full():
+                result = 0.0
+
+        # Phase B: pure policy moves (still per game, but fast)
+        while result is None:
+            move_num = len(history)
+            temp = temperature if move_num < temp_decay_move else 0.1
+
+            planes_snapshot = board_to_planes(board)
+            x = torch.from_numpy(planes_snapshot).unsqueeze(0).to(
+                device=device, dtype=torch.bfloat16
+            )
+            logits, _ = network(x)
+            policy = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
+
+            legal_mask = _get_legal_mask(board)
+            masked_policy = policy * legal_mask
+            total = masked_policy.sum()
+            if total > 0:
+                masked_policy /= total
+            else:
+                masked_policy[legal_mask > 0] = 1.0 / legal_mask.sum()
+
+            move = _sample_move(masked_policy, temp)
+            history.append((planes_snapshot, None, move, board.current))
+
+            board.play(move)
+            winner = mcts_searcher._check_winner(board, move)
+            if winner is not None:
+                result = 1.0 if winner == BLACK else -1.0
+            elif board.is_full():
+                result = 0.0
+
+        records.append({"history": history, "result": result})
+
+    return records
+
+
+def _sample_move(policy: np.ndarray, temp: float) -> int:
+    if temp < 1e-8:
+        return int(np.argmax(policy))
+    tempered = policy ** (1.0 / temp)
+    tempered /= tempered.sum()
+    return int(np.random.choice(len(tempered), p=tempered))
+
+
+# ---------------------------------------------------------------------------
+# Convert records to training samples
+# ---------------------------------------------------------------------------
+
 def records_to_samples(
     records: list[dict],
     augment: int = 4,
-) -> list[tuple[np.ndarray, int, float]]:
-    """Convert game records to (planes, move, outcome) training samples."""
+) -> list[tuple[np.ndarray, int, float, np.ndarray | None]]:
+    """Convert game records to (planes, move, outcome, mcts_policy) samples."""
     samples = []
+    rng = np.random.default_rng()
     for rec in records:
         result = rec["result"]
-        for planes, policy, player in rec["history"]:
+        for planes, mcts_pol, move, player in rec["history"]:
             outcome = result if player == BLACK else -result
-            move = int(np.argmax(policy))
-            samples.append((planes, move, outcome))
+            samples.append((planes, move, outcome, mcts_pol))
 
             if augment > 1:
-                rng = np.random.default_rng()
                 for _ in range(augment - 1):
                     t = int(rng.integers(1, NUM_TRANSFORMS))
-                    aug_planes = np.stack([transform_board(planes[i], t) for i in range(planes.shape[0])])
-                    aug_move = int(transform_policy(policy, t).argmax())
-                    samples.append((aug_planes, aug_move, outcome))
+                    aug_planes = np.stack([
+                        transform_board(planes[i], t)
+                        for i in range(planes.shape[0])
+                    ])
+                    aug_move = int(transform_policy(
+                        _move_to_policy(move), t
+                    ).argmax())
+                    aug_mcts = None
+                    if mcts_pol is not None:
+                        aug_mcts = transform_policy(mcts_pol, t)
+                    samples.append((aug_planes, aug_move, outcome, aug_mcts))
 
     return samples
 
+
+def _move_to_policy(move: int) -> np.ndarray:
+    p = np.zeros(225, dtype=np.float32)
+    p[move] = 1.0
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Top-level API
+# ---------------------------------------------------------------------------
 
 def generate_games(
     network: torch.nn.Module,
     device: torch.device,
     num_games: int,
-    num_simulations: int = 400,
-    c_puct: float = 2.0,
     temp_threshold: int = 30,
     augment: int = 4,
     parallel_games: int = 256,
-) -> list[tuple[np.ndarray, int, float]]:
-    """Generate self-play games (API-compatible signature)."""
-    records = play_games_fast(
-        network, device,
-        num_games=num_games,
-        temperature=1.0,
-        temp_decay_move=temp_threshold,
-        batch_size=parallel_games,
-    )
+    use_mcts: bool = False,
+    mcts_sims: int = 25,
+    mcts_moves: int = 10,
+    use_renju: bool = False,
+    dirichlet_alpha: float = 0.3,
+) -> list[tuple[np.ndarray, int, float, np.ndarray | None]]:
+    """Generate self-play games. Returns training samples."""
+    if use_mcts:
+        searcher = MCTSSearch(
+            network, device,
+            num_simulations=mcts_sims,
+            dirichlet_alpha=dirichlet_alpha,
+            use_renju=use_renju,
+        )
+        records = play_games_with_mcts(
+            network, device,
+            num_games=num_games,
+            mcts_searcher=searcher,
+            mcts_moves=mcts_moves,
+            temperature=1.0,
+            temp_decay_move=temp_threshold,
+        )
+    else:
+        records = play_games_fast(
+            network, device,
+            num_games=num_games,
+            temperature=1.0,
+            temp_decay_move=temp_threshold,
+            batch_size=parallel_games,
+        )
     return records_to_samples(records, augment=augment)

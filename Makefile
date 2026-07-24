@@ -1,8 +1,9 @@
 REMOTE ?= user@your-dev-machine
 REMOTE_DIR ?= ~/gomonova
 CFG ?= configs/train_main.yaml
+NGPU ?= 4
 
-.PHONY: sync-up sync-down train play test backup
+.PHONY: sync-up sync-down train train-ddp play test backup
 
 sync-up:
 	rsync -avz --delete \
@@ -15,6 +16,9 @@ sync-down:
 
 train:
 	ssh $(REMOTE) "cd $(REMOTE_DIR) && python scripts/train.py --config $(CFG)"
+
+train-ddp:
+	ssh $(REMOTE) "cd $(REMOTE_DIR) && torchrun --nproc_per_node=$(NGPU) scripts/train.py --config $(CFG)"
 
 play:
 	python -m gomonova.cli.play

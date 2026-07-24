@@ -50,16 +50,18 @@ class Trainer:
         return lr
 
     def train_step(self, replay: ReplayBuffer, batch_size: int) -> tuple[float, float, float]:
-        planes, moves, outcomes = replay.sample(batch_size)
+        planes, moves, outcomes, mcts_pol = replay.sample(batch_size)
         x = torch.from_numpy(planes).to(self.device)
         move_indices = torch.from_numpy(moves).to(self.device)
         outcome_values = torch.from_numpy(outcomes).to(self.device)
+        mcts_tensor = torch.from_numpy(mcts_pol).to(self.device)
 
         self.optimizer.zero_grad()
         with torch.amp.autocast(self.device.type, dtype=torch.bfloat16, enabled=self.use_amp):
             logits, value_pred = self.network(x)
             loss, p_loss, v_loss = total_loss(
-                logits, value_pred, move_indices, outcome_values, self.network
+                logits, value_pred, move_indices, outcome_values,
+                self.network, mcts_policy=mcts_tensor,
             )
 
         loss.backward()
