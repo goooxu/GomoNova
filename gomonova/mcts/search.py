@@ -131,3 +131,77 @@ class MCTSSearch:
             np.random.choice(len(policy), p=policy)
         )
         return move, policy
+
+    @torch.no_grad()
+    def batch_search(
+        self, boards: list[Board], add_noise: bool = True,
+    ) -> list[np.ndarray]:
+        """Run MCTS on multiple boards simultaneously with batched NN eval.
+
+        Key optimizations over per-game search:
+          - NN evaluations are batched across all games (1 GPU call per round)
+          - Uses board.undo() instead of board.copy() per simulation
+        """
+        n = len(boards)
+        if n == 0:
+            return []
+        dtype = next(self.network.parameters()).dtype
+
+        roots: list[MCTSNode] = []
+        for board in boards:
+            root = MCTSNode()
+            policy, _ = self._evaluate(board)
+            legal = self._get_legal_actions(board)
+            root.expand(policy, legal)
+            if add_noise:
+                root.add_dirichlet_noise(self.dirichlet_alpha, self.dirichlet_epsilon)
+            roots.append(root)
+
+        for _ in range(self.num_simulations):
+            expand_info: list[tuple[int, MCTSNode, Board]] = []
+
+            for i in range(n):
+                node = roots[i]
+                board = boards[i]
+                moves_played: list[int] = []
+                terminal = False
+
+                while node.is_expanded and node.children:
+                    node = node.best_child(self.c_puct)
+                    board.play(node.action)
+                    moves_played.append(node.action)
+                    winner = self._check_winner(board, node.action)
+                    if winner is not None:
+                        value = -1.0 if board.current == BLACK else 1.0
+                        node.backup(value)
+                        terminal = True
+                        break
+                    if board.is_full():
+                        node.backup(0.0)
+                        terminal = True
+                        break
+
+                for _ in moves_played:
+                    board.undo()
+
+                if not terminal and not node.is_expanded:
+                    expand_info.append((i, node, board))
+
+            if expand_info:
+                planes = np.stack([
+                    board_to_planes(b) for _, _, b in expand_info
+                ])
+                x = torch.from_numpy(planes).to(device=self.device, dtype=dtype)
+                logits, values = self.network(x)
+                policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
+                vals = values.float().squeeze(-1).cpu().numpy()
+
+                for j, (i, node, board) in enumerate(expand_info):
+                    legal = self._get_legal_actions(board)
+                    if len(legal) == 0:
+                        node.backup(0.0)
+                    else:
+                        node.expand(policies[j], legal)
+                        node.backup(float(vals[j]))
+
+        return [root.get_visit_distribution(1.0) for root in roots]

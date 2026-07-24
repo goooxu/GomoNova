@@ -141,64 +141,88 @@ def play_games_with_mcts(
     temp_decay_move: int = 20,
     batch_size: int = 256,
 ) -> list[dict]:
-    """Play games with MCTS for opening moves, pure policy for the rest."""
+    """Play games with batched MCTS for opening, then batched pure policy."""
     network.eval()
     dtype = _net_dtype(network)
-    records = []
 
-    for game_idx in range(num_games):
-        board = Board()
-        history: list[tuple] = []
-        result = None
+    boards = [Board() for _ in range(num_games)]
+    histories: list[list[tuple]] = [[] for _ in range(num_games)]
+    results: list[float | None] = [None] * num_games
 
-        # Phase A: MCTS moves (sequential per game)
-        for move_num in range(mcts_moves):
-            if result is not None:
-                break
-            temp = temperature if move_num < temp_decay_move else 0.1
+    # Phase A: batched MCTS moves
+    for move_num in range(mcts_moves):
+        active = [i for i in range(num_games) if results[i] is None]
+        if not active:
+            break
+
+        active_boards = [boards[i] for i in active]
+        temp = temperature if move_num < temp_decay_move else 0.1
+        visit_dists = mcts_searcher.batch_search(active_boards, add_noise=True)
+
+        for idx, game_idx in enumerate(active):
+            board = boards[game_idx]
+            mcts_policy = visit_dists[idx]
             planes_snapshot = board_to_planes(board)
-            move, mcts_policy = mcts_searcher.get_move(board, temperature=temp)
-            history.append((planes_snapshot, mcts_policy, move, board.current))
-            board.play(move)
-            winner = mcts_searcher._check_winner(board, move)
-            if winner is not None:
-                result = 1.0 if winner == BLACK else -1.0
-            elif board.is_full():
-                result = 0.0
-
-        # Phase B: pure policy moves (still per game, but fast)
-        while result is None:
-            move_num = len(history)
-            temp = temperature if move_num < temp_decay_move else 0.1
-
-            planes_snapshot = board_to_planes(board)
-            x = torch.from_numpy(planes_snapshot).unsqueeze(0).to(
-                device=device, dtype=dtype
-            )
-            logits, _ = network(x)
-            policy = torch.softmax(logits.float(), dim=1).cpu().numpy()[0]
 
             legal_mask = _get_legal_mask(board)
-            masked_policy = policy * legal_mask
-            total = masked_policy.sum()
+            masked = mcts_policy * legal_mask
+            total = masked.sum()
             if total > 0:
-                masked_policy /= total
+                masked /= total
             else:
-                masked_policy[legal_mask > 0] = 1.0 / legal_mask.sum()
+                masked[legal_mask > 0] = 1.0 / legal_mask.sum()
 
-            move = _sample_move(masked_policy, temp)
-            history.append((planes_snapshot, None, move, board.current))
+            move = _sample_move(masked, temp)
+            histories[game_idx].append(
+                (planes_snapshot, mcts_policy.copy(), move, board.current)
+            )
+            board.play(move)
+            winner = mcts_searcher._check_winner(board, move)
+            if winner is not None:
+                results[game_idx] = 1.0 if winner == BLACK else -1.0
+            elif board.is_full():
+                results[game_idx] = 0.0
+
+    # Phase B: batched pure policy moves (lockstep)
+    while True:
+        active = [i for i in range(num_games) if results[i] is None]
+        if not active:
+            break
+
+        active_boards = [boards[i] for i in active]
+        planes = np.stack([board_to_planes(b) for b in active_boards])
+        x = torch.from_numpy(planes).to(device=device, dtype=dtype)
+        logits, _ = network(x)
+        policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
+
+        for idx, game_idx in enumerate(active):
+            board = boards[game_idx]
+            move_num = len(histories[game_idx])
+            temp = temperature if move_num < temp_decay_move else 0.1
+
+            legal_mask = _get_legal_mask(board)
+            masked = policies[idx] * legal_mask
+            total = masked.sum()
+            if total > 0:
+                masked /= total
+            else:
+                masked[legal_mask > 0] = 1.0 / legal_mask.sum()
+
+            planes_snapshot = board_to_planes(board)
+            move = _sample_move(masked, temp)
+            histories[game_idx].append((planes_snapshot, None, move, board.current))
 
             board.play(move)
             winner = mcts_searcher._check_winner(board, move)
             if winner is not None:
-                result = 1.0 if winner == BLACK else -1.0
+                results[game_idx] = 1.0 if winner == BLACK else -1.0
             elif board.is_full():
-                result = 0.0
+                results[game_idx] = 0.0
 
-        records.append({"history": history, "result": result})
-
-    return records
+    return [
+        {"history": histories[i], "result": results[i]}
+        for i in range(num_games)
+    ]
 
 
 def _sample_move(policy: np.ndarray, temp: float) -> int:
