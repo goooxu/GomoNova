@@ -157,7 +157,19 @@ def play_games_with_mcts(
 
         active_boards = [boards[i] for i in active]
         temp = temperature if move_num < temp_decay_move else 0.1
-        visit_dists = mcts_searcher.flat_batch_search(active_boards, add_noise=True)
+        if len(active_boards) >= 32:
+            from .parallel_mcts import parallel_batch_search
+            visit_dists = parallel_batch_search(
+                active_boards, network, device,
+                num_workers=min(36, len(active_boards)),
+                num_simulations=mcts_searcher.num_simulations,
+                c_puct=mcts_searcher.c_puct,
+                dirichlet_alpha=mcts_searcher.dirichlet_alpha,
+                dirichlet_epsilon=mcts_searcher.dirichlet_epsilon,
+                use_renju=mcts_searcher.use_renju,
+            )
+        else:
+            visit_dists = mcts_searcher.flat_batch_search(active_boards, add_noise=True)
 
         for idx, game_idx in enumerate(active):
             board = boards[game_idx]
