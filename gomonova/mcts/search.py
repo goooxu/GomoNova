@@ -12,6 +12,7 @@ import torch
 from ..game.board import BLACK, BOARD_SIZE, Board, pos_to_rc
 from ..game.rules import check_winner_at, is_legal
 from ..nn.encoder import board_to_planes
+from .flat_tree import FlatMCTSTree
 from .node import MCTSNode
 
 _DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
@@ -220,3 +221,78 @@ class MCTSSearch:
                         node.backup(float(vals[j]))
 
         return [root.get_visit_distribution(1.0) for root in roots]
+
+    @torch.no_grad()
+    def flat_batch_search(
+        self, boards: list[Board], add_noise: bool = True,
+    ) -> list[np.ndarray]:
+        """Batched MCTS using array-based trees + batched NN eval.
+
+        Combines two optimizations:
+          1. FlatMCTSTree: numpy arrays instead of Python objects (~10× faster node ops)
+          2. Batched NN eval: one GPU call per simulation round
+        """
+        n = len(boards)
+        if n == 0:
+            return []
+        dtype = next(self.network.parameters()).dtype
+        max_nodes = self.num_simulations + 2
+
+        trees = [FlatMCTSTree(max_nodes) for _ in range(n)]
+        for i, board in enumerate(boards):
+            policy, _ = self._evaluate(board)
+            legal = self._get_legal_actions(board)
+            trees[i].expand_node(0, policy, legal)
+            if add_noise:
+                trees[i].add_dirichlet(0, self.dirichlet_alpha, self.dirichlet_epsilon)
+
+        for _ in range(self.num_simulations):
+            expand_info: list[tuple[int, int, Board]] = []
+
+            for i in range(n):
+                tree = trees[i]
+                board = boards[i]
+                node = 0
+                slots: list[int] = []
+                terminal = False
+
+                while tree.is_expanded[node] and tree.num_children[node] > 0:
+                    slot, action = tree.best_child(node, self.c_puct)
+                    board.play(action)
+                    slots.append(slot)
+                    winner = self._check_winner(board, action)
+                    if winner is not None:
+                        value = -1.0 if board.current == BLACK else 1.0
+                        tree.backup(slots, value)
+                        terminal = True
+                        break
+                    if board.is_full():
+                        tree.backup(slots, 0.0)
+                        terminal = True
+                        break
+                    node = tree.alloc_node()
+
+                for _ in slots:
+                    board.undo()
+
+                if not terminal:
+                    expand_info.append((i, node, board))
+
+            if expand_info:
+                planes = np.stack([
+                    board_to_planes(b) for _, _, b in expand_info
+                ])
+                x = torch.from_numpy(planes).to(device=self.device, dtype=dtype)
+                logits, values = self.network(x)
+                policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
+                vals = values.float().squeeze(-1).cpu().numpy()
+
+                for j, (i, node, board) in enumerate(expand_info):
+                    legal = self._get_legal_actions(board)
+                    if len(legal) == 0:
+                        trees[i].backup([node], 0.0)
+                    else:
+                        trees[i].expand_node(node, policies[j], legal)
+                        trees[i].backup([node], float(vals[j]))
+
+        return [trees[i].get_visit_distribution(1.0) for i in range(n)]

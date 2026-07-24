@@ -157,7 +157,7 @@ def play_games_with_mcts(
 
         active_boards = [boards[i] for i in active]
         temp = temperature if move_num < temp_decay_move else 0.1
-        visit_dists = mcts_searcher.batch_search(active_boards, add_noise=True)
+        visit_dists = mcts_searcher.flat_batch_search(active_boards, add_noise=True)
 
         for idx, game_idx in enumerate(active):
             board = boards[game_idx]

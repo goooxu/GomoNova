@@ -1,9 +1,12 @@
-"""Master training pipeline with DDP, MCTS phases, and opponent diversity.
+"""Master training pipeline with DDP, parallel MCTS, and opponent diversity.
 
 Three training phases:
   Phase 1 (0 → mcts_start):       Pure policy self-play (fast warmup)
   Phase 2 (mcts_start → renju_start): MCTS-guided, freestyle rules
   Phase 3 (renju_start → end):    MCTS-guided, Renju rules
+
+Self-play runs on ALL CPU cores via ParallelSelfPlay (one worker per core).
+Training runs on GPU(s) via DDP.
 
 Launch with: torchrun --nproc_per_node=4 scripts/train.py --config ...
 Falls back to single-GPU when launched without torchrun.
@@ -29,7 +32,6 @@ from .trainer import Trainer
 
 
 def _setup_ddp() -> tuple[int, int, bool]:
-    """Initialize DDP if launched via torchrun. Returns (rank, world_size, is_ddp)."""
     if "RANK" in os.environ:
         dist.init_process_group("nccl")
         rank = int(os.environ["RANK"])
@@ -81,7 +83,6 @@ def run_pipeline(config_path: str) -> None:
     # --- Networks ---
     network = _make_network(model_cfg, device)
     best_network = _make_network(model_cfg, device)
-    opponent_network = _make_network(model_cfg, device)
 
     if rank == 0:
         print(f"Device: {device}, GPUs: {world_size}, DDP: {is_ddp}")
@@ -106,7 +107,6 @@ def run_pipeline(config_path: str) -> None:
         return net.module if isinstance(net, DDP) else net
 
     best_network.load_state_dict(_raw_model(network).state_dict())
-    opponent_network.load_state_dict(_raw_model(network).state_dict())
 
     trainer = Trainer(
         network, device,
@@ -120,9 +120,7 @@ def run_pipeline(config_path: str) -> None:
     )
     replay = ReplayBuffer(capacity=replay_cfg["capacity"])
 
-    # Historical checkpoint pool for opponent diversity
     history_pool: list[str] = []
-
     total_iters = train_cfg["total_iters"]
     games_per_iter = sp_cfg["games_per_iter"]
 
@@ -130,27 +128,13 @@ def run_pipeline(config_path: str) -> None:
         t0 = time.time()
         lr = trainer.update_lr(iteration)
 
-        # --- Determine phase ---
         use_mcts = iteration >= mcts_start
         use_renju = iteration >= renju_start
 
-        # --- Opponent diversity ---
-        use_opponent = (
-            len(history_pool) > 0
-            and random.random() < history_ratio
-        )
-        if use_opponent:
-            ckpt_path = random.choice(history_pool)
-            load_checkpoint(ckpt_path, opponent_network, device)
-            sp_network = opponent_network
-        else:
-            sp_network = _raw_model(network)
-
         # --- Self-play ---
         _raw_model(network).eval()
-        sp_network.eval()
         samples = generate_games(
-            sp_network, device,
+            _raw_model(network), device,
             num_games=games_per_iter,
             temp_threshold=sp_cfg.get("temp_threshold", 20),
             augment=4,
@@ -168,7 +152,7 @@ def run_pipeline(config_path: str) -> None:
                 print(f"Iter {iteration}: collecting data ({len(replay)} samples)")
             continue
 
-        # --- Train ---
+        # --- Train (GPU) ---
         network.train()
         t1 = time.time()
         metrics = trainer.train_epoch(
