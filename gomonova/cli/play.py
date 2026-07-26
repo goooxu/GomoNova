@@ -21,7 +21,7 @@ import numpy as np
 import torch
 
 from ..game.board import BLACK, WHITE, BOARD_SIZE, Board, pos_to_rc
-from ..game.rules import check_winner_at, is_legal
+from ..game.rules import check_winner_at, is_forbidden, is_legal
 from ..inference.player import InferencePlayer
 from ..nn.network import GomoNovaNet
 from ..utils.checkpoint import load_checkpoint
@@ -176,11 +176,16 @@ def _game_loop(stdscr, player: InferencePlayer, human_color: int):
                 message = "New game. Your turn."
                 if human_color == WHITE:
                     move, policy, value = player.get_move(board)
-                    board.play(move)
-                    last_move = move
-                    r, c = pos_to_rc(move)
-                    ai_top = [(move, float(policy[move]))]
-                    message = f"AI plays {COL_LABELS[c]}{r+1}. Your turn."
+                    if board.current == BLACK and is_forbidden(board, move):
+                        r, c = pos_to_rc(move)
+                        message = f"AI plays {COL_LABELS[c]}{r+1} — forbidden! You win!"
+                        game_over = True
+                    else:
+                        board.play(move)
+                        last_move = move
+                        r, c = pos_to_rc(move)
+                        ai_top = [(move, float(policy[move]))]
+                        message = f"AI plays {COL_LABELS[c]}{r+1}. Your turn."
                 continue
 
             if board.current != human_color:
@@ -213,9 +218,15 @@ def _game_loop(stdscr, player: InferencePlayer, human_color: int):
             time.sleep(0.1)
 
             move, policy, value = player.get_move(board)
+            r, c = pos_to_rc(move)
+
+            if board.current == BLACK and is_forbidden(board, move):
+                message = f"AI plays {COL_LABELS[c]}{r+1} — forbidden! You win!"
+                game_over = True
+                continue
+
             board.play(move)
             last_move = move
-            r, c = pos_to_rc(move)
             ai_top = player.top_k(board, k=3)
             message = f"AI plays {COL_LABELS[c]}{r+1} (value={value:+.2f}). Your turn."
 
