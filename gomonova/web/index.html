@@ -498,8 +498,9 @@ function draw(now) {
     let scale = 1;
     const t0 = placedAt[pos];
     if (t0 !== undefined) {
-      const t = Math.min(1, (now - t0) / 220);
-      scale = 0.5 + 0.5 * easeOutBack(t);
+      const t = (now - t0) / 220;
+      if (t < 0) continue;                 // staggered entry not started yet
+      scale = 0.5 + 0.5 * easeOutBack(Math.min(1, t));
       if (t >= 1) delete placedAt[pos];
     }
     drawStone(x, y, radius * scale, color, 1);
