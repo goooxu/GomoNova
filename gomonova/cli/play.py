@@ -197,7 +197,9 @@ def _game_loop(stdscr, player: InferencePlayer, human_color: int):
                 message = "Position occupied! Choose another."
                 continue
             if not is_legal(board, pos):
-                message = "Forbidden move (Renju rule)!"
+                r, c = pos_to_rc(pos)
+                message = f"You played {COL_LABELS[c]}{r+1} — forbidden! AI wins."
+                game_over = True
                 continue
 
             board.play(pos)
