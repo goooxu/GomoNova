@@ -73,11 +73,30 @@ def _rebuild(moves: list[int]) -> Board:
     return board
 
 
+def _result(
+    board: Board,
+    status: str,
+    ai_move: int | None = None,
+    forbidden_pos: int | None = None,
+    black_value: float | None = None,
+    top_k: list | None = None,
+    win_line: list | None = None,
+) -> dict:
+    return {
+        "moves": board.history,
+        "ai_move": ai_move,
+        "status": status,
+        "forbidden_pos": forbidden_pos,
+        "black_value": black_value,
+        "top_k": top_k or [],
+        "win_line": win_line or [],
+    }
+
+
 def _ai_turn(board: Board, human_color: int) -> dict:
     """Let the model play one move for the AI.  Returns result payload."""
     ai_color = WHITE if human_color == BLACK else BLACK
     move, policy, value = _player.get_move(board)
-    r, c = pos_to_rc(move)
 
     top_k = [
         [int(i), float(policy[i])]
@@ -87,49 +106,18 @@ def _ai_turn(board: Board, human_color: int) -> dict:
 
     # Raw model output — if the model picks a forbidden spot, it loses.
     if ai_color == BLACK and is_forbidden(board, move):
-        return {
-            "moves": board.history,
-            "ai_move": move,
-            "status": "ai_forbidden",
-            "forbidden_pos": move,
-            "black_value": None,
-            "top_k": top_k,
-            "win_line": [],
-        }
+        return _result(board, "ai_forbidden", ai_move=move, forbidden_pos=move, top_k=top_k)
 
     board.play(move)
-    black_value = value if ai_color == BLACK else -value
+    black_value = float(value if ai_color == BLACK else -value)
 
     winner = check_winner_at(board, move)
     if winner is not None:
-        return {
-            "moves": board.history,
-            "ai_move": move,
-            "status": "ai_win",
-            "forbidden_pos": None,
-            "black_value": float(black_value),
-            "top_k": top_k,
-            "win_line": _winning_line(board, move),
-        }
+        return _result(board, "ai_win", ai_move=move, black_value=black_value,
+                       top_k=top_k, win_line=_winning_line(board, move))
     if board.is_full():
-        return {
-            "moves": board.history,
-            "ai_move": move,
-            "status": "draw",
-            "forbidden_pos": None,
-            "black_value": float(black_value),
-            "top_k": top_k,
-            "win_line": [],
-        }
-    return {
-        "moves": board.history,
-        "ai_move": move,
-        "status": "playing",
-        "forbidden_pos": None,
-        "black_value": float(black_value),
-        "top_k": top_k,
-        "win_line": [],
-    }
+        return _result(board, "draw", ai_move=move, black_value=black_value, top_k=top_k)
+    return _result(board, "playing", ai_move=move, black_value=black_value, top_k=top_k)
 
 
 @app.post("/api/play")
@@ -146,38 +134,16 @@ def play(req: PlayRequest) -> dict:
 
         # Human plays a forbidden spot -> immediate loss (no move placed).
         if human_color == BLACK and is_forbidden(board, pos):
-            return {
-                "moves": board.history,
-                "ai_move": None,
-                "status": "human_forbidden",
-                "forbidden_pos": pos,
-                "black_value": None,
-                "top_k": [],
-                "win_line": [],
-            }
+            return _result(board, "human_forbidden", forbidden_pos=pos)
 
         board.play(pos)
         winner = check_winner_at(board, pos)
         if winner is not None:
-            return {
-                "moves": board.history,
-                "ai_move": None,
-                "status": "human_win",
-                "forbidden_pos": None,
-                "black_value": 1.0 if winner == BLACK else -1.0,
-                "top_k": [],
-                "win_line": _winning_line(board, pos),
-            }
+            return _result(board, "human_win",
+                           black_value=1.0 if winner == BLACK else -1.0,
+                           win_line=_winning_line(board, pos))
         if board.is_full():
-            return {
-                "moves": board.history,
-                "ai_move": None,
-                "status": "draw",
-                "forbidden_pos": None,
-                "black_value": 0.0,
-                "top_k": [],
-                "win_line": [],
-            }
+            return _result(board, "draw", black_value=0.0)
 
     return _ai_turn(board, human_color)
 
