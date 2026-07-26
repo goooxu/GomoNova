@@ -60,9 +60,35 @@ GomoNova 在开局前 20 手用较高温度（多探索），之后用低温度�
 
 最简单的自博弈：网络直接用自己的策略输出选子，一局一局下完。
 
+### 开局：强制天元（连珠规则）
+
+每一局自博弈都从**强制天元开局**开始：黑棋第一手固定下在天元（H8），之后才进入正常的网络自博弈。
+
+```python
+TENGAN = rc_to_pos(7, 7)   # 天元 H8
+
+def _open_game():
+    board = Board()
+    planes = board_to_planes(board)   # 空盘，黑先
+    board.play(TENGAN)                # 强制黑第一手下天元
+    return board, (planes, None, TENGAN, BLACK)
+```
+
+**为什么这么做？** 连珠规则本就规定黑棋第一手必须下天元。早期版本没有强制这条规则，纯自博弈的网络开局经常乱下边角（如 B1、N1）——这在真实连珠里其实是**非法开局**。强制天元开局后：
+
+- 所有训练对局都从合法的天元开局开始，网络学会"第一手 = 天元"。
+- 天元这手作为训练样本（`mcts_policy=None`，走结果加权 CE），在每一局中反复强化"空盘 → 天元"的映射。
+- **对战时无需任何规则干预**：模型在这个训练分布上学会后，纯推理自然会把第一手下在天元。
+
+这是"把规则约束转化为训练分布"的典型做法——不在推理时加逻辑，而是让模型从数据里把规则内化。
+
 ```python
 def play_games_fast(network, device, num_games, ...):
-    boards = [Board() for _ in range(num_games)]   # 同时开 num_games 局
+    # 每局先强制天元开局（_open_game），再进入网络自博弈
+    boards, histories = [], []
+    for _ in range(num_games):
+        board, opening = _open_game()              # 黑第一手固定天元
+        boards.append(board); histories.append([opening])
     while active:
         # 把所有活跃棋盘打包成一个 batch，一次前向推理
         planes = np.stack([board_to_planes(b) for b in active_boards])
