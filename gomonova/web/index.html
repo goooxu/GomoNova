@@ -416,7 +416,12 @@ function makeBoardTexture(px) {
 // ---------- geometry ----------
 function resize() {
   const zone = document.querySelector('.board-zone');
-  const avail = Math.min(zone.clientWidth, zone.clientHeight) - 10;
+  // Stacked layout (board on top, panel below): the zone has no fixed
+  // height, so size the board by width to fill the screen.  Side-by-side
+  // layout: constrained by the smaller of width/height (100vh).
+  const stacked = window.matchMedia('(max-width: 1020px)').matches;
+  const limit = stacked ? zone.clientWidth : Math.min(zone.clientWidth, zone.clientHeight);
+  const avail = limit - 10;
   const px = Math.max(300, avail);
   const dpr = window.devicePixelRatio || 1;
   canvas.width = px * dpr; canvas.height = px * dpr;
