@@ -60,11 +60,11 @@
   .app {
     position: relative; z-index: 1;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 256px;
-    gap: 10px;
+    grid-template-columns: minmax(0, 1fr) 372px;
+    gap: 26px;
     height: 100vh;
-    padding: 6px 10px;
-    max-width: 1840px;
+    padding: 24px 28px;
+    max-width: 1520px;
     margin: 0 auto;
   }
 
@@ -75,7 +75,7 @@
   }
   .board-frame {
     position: relative;
-    padding: 4px;
+    padding: 12px;
     border-radius: 16px;
     background: linear-gradient(150deg, #232f47, #172034);
     border: 1px solid var(--border-strong);
@@ -416,18 +416,13 @@ function makeBoardTexture(px) {
 // ---------- geometry ----------
 function resize() {
   const zone = document.querySelector('.board-zone');
-  // Stacked layout (board on top, panel below): the zone has no fixed
-  // height, so size the board by width to fill the screen.  Side-by-side
-  // layout: constrained by the smaller of width/height (100vh).
-  const stacked = window.matchMedia('(max-width: 1020px)').matches;
-  const limit = stacked ? zone.clientWidth : Math.min(zone.clientWidth, zone.clientHeight);
-  const avail = limit - 10;
+  const avail = Math.min(zone.clientWidth, zone.clientHeight) - 24;
   const px = Math.max(300, avail);
   const dpr = window.devicePixelRatio || 1;
   canvas.width = px * dpr; canvas.height = px * dpr;
   canvas.style.width = px + 'px'; canvas.style.height = px + 'px';
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  geom.px = px; geom.off = px * 0.036;
+  geom.px = px; geom.off = px * 0.052;
   geom.cell = (px - 2 * geom.off) / (SIZE - 1);
   if (!boardTex || Math.abs(boardTex.width - px) > 40) boardTex = makeBoardTexture(px);
 }
