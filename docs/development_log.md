@@ -183,11 +183,19 @@ eval:
 
 ## 后续优化方向
 
-1. **引入 MCTS（C++/CUDA 实现）：** 用 MCTS 生成更高质量的训练目标，加速收敛
-2. **更大模型：** 当前 12.5M 参数，可尝试 30-50M（增加通道数和层数）
+**已完成（V2/V2.1）：**
+- ✅ 引入 MCTS 引导训练（Python 优化版，共享内存并行，6.9× 加速）
+- ✅ 更大模型（12.5M → 62.7M）
+- ✅ 对手多样性（历史 checkpoint 池，50% 对局）
+- ✅ 禁手感知训练（连珠阶段）
+- ✅ 强制天元开局（修复走边）
+
+**仍可探索：**
+1. **C++/CUDA MCTS：** 当前 MCTS 是 Python 实现，C++ 重写可进一步加速，支持更多模拟次数
+2. **开局深化：** 用更深 MCTS（几百次模拟）生成开局数据，强化开局定式（仍从规则生成，不用棋谱）
 3. **课程学习：** 先在小棋盘（9×9）训练基本战术，再迁移到 15×15
-5. **对手多样性：** 与历史 checkpoint 对弈，避免策略循环
-6. **禁手感知训练：** 在训练后期加入禁手约束，让网络学会利用禁手
+4. **更大模型 + 更长训练：** 200M+ 模型、10000+ 轮，通常能显著提升棋力
+5. **对战时轻量搜索：** 关键局面做极少量模拟补充（会突破"纯推理"约束，需权衡）
 
 ## 项目结构
 
@@ -196,27 +204,38 @@ gomonova/
 ├── configs/          # 训练/推理配置
 ├── gomonova/
 │   ├── game/         # 棋盘、连珠规则、对称变换
-│   ├── nn/           # MSAR-Net 网络定义
-│   ├── mcts/         # MCTS（备用，当前训练未使用）
-│   ├── training/     # 自博弈、经验回放、训练器、评估器、管线
+│   ├── nn/           # MSAR-Net 网络定义、损失函数
+│   ├── mcts/         # MCTS：node（对象版）、flat_tree（数组版）、search
+│   ├── training/     # 自博弈、parallel_mcts（共享内存并行）、回放、训练器、评估器、管线
 │   ├── inference/    # 纯前向推理（无搜索）
-│   ├── cli/          # 命令行对战工具
+│   ├── cli/          # curses 命令行对战
+│   ├── web/          # FastAPI 后端 + Canvas 前端对弈
 │   └── utils/        # 配置加载、checkpoint
-├── scripts/          # 训练入口、同步脚本
-├── tests/            # 单元测试（63个）
-└── docs/             # 本文档
+├── scripts/          # 训练入口、超参搜索、checkpoint 定时写回
+├── tests/            # 单元测试（77个）
+└── docs/             # 开发日志、技术报告（technical_report/）
 ```
 
 ## 使用方法
 
 ### 训练
 ```bash
+# 单 GPU
 python scripts/train.py --config configs/train_main.yaml
+
+# 4 GPU DDP（推荐）
+torchrun --nproc_per_node=4 scripts/train.py --config configs/train_main.yaml
 ```
 
-### 对战
+### 对战（CLI）
 ```bash
 python -m gomonova.cli.play --checkpoint checkpoints/best.pt
+```
+
+### 对战（Web）
+```bash
+python -m gomonova.web.server --checkpoint checkpoints/best.pt --port 8000
+# 浏览器打开 http://localhost:8000
 ```
 
 ### 测试
@@ -286,10 +305,10 @@ python -m pytest tests/ -v
 
 ### 配置变更
 ```yaml
-model: { channels: 192, num_blocks: 10, policy_channels: 96, value_channels: 48 }
-training: { batch_size: 2048, lr: 1e-4, total_iters: 3000, train_steps_per_iter: 64 }
-selfplay: { games_per_iter: 512, mcts_sims: 25, mcts_moves: 10 }
-phases: { mcts_start: 500, renju_start: 2200 }
+model: { channels: 192, num_blocks: 10, policy_channels: 96, value_channels: 48 }  # 62.7M 参数
+training: { batch_size: 2048, lr: 1e-4, total_iters: 3000, train_steps_per_iter: 32 }
+selfplay: { games_per_iter: 512, mcts_sims: 25, mcts_moves: 5 }
+phases: { mcts_start: 300, renju_start: 2400 }
 ```
 
 ### 训练命令
@@ -303,3 +322,61 @@ torchrun --nproc_per_node=4 scripts/train.py --config configs/train_main.yaml
 # 或使用 Makefile
 make train-ddp NGPU=4
 ```
+
+---
+
+## V2.1 最终完善：开局修复、性能攻坚与训练完成
+
+### 强制天元开局（修复"开局走边"）
+
+**问题：** V2 模型开局经常下在边角（B1、N1），而非天元。这其实违反连珠规则（黑第一手必须下天元）。根因是纯自博弈无开局引导，走边习惯自我强化；位置编码也学不出足够强的中心偏好。
+
+**解决：** 在 `selfplay.py` 的 `play_games_fast` 和 `play_games_with_mcts` 中，每局开始强制黑第一手下天元（H8 = pos 112），并作为训练样本（`mcts_policy=None`，走 outcome-weighted CE）。模型从训练分布学会"第一手=天元"，对战时纯推理自然下天元，**无需推理时规则干预**。这是"把规则约束转化为训练分布"的做法。
+
+**决策：** 用户选择从头重训（方案 B），而非微调——旧权重已固化走边习惯，且几乎没学过天元开局的应对（微调还需 LR 重新升温）。旧走边模型保留为 `checkpoints/best_edge.pt`，历史快照归档到 `checkpoints/edge_v1/`。
+
+### 性能优化（MCTS 自博弈 6.9× 加速）
+
+V2 重新引入 MCTS 后，朴素实现慢到无法训练（512 局 MCTS 需 105.9s，GPU 大部分时间空等 Python 树遍历）。**关键洞察：瓶颈是 CPU 上的 Python 树遍历，不是 GPU。** 经过系统优化：
+
+| 优化 | 手段 | 效果 |
+|------|------|------|
+| 批量 GPU 评估 | MCTS 叶节点合并成批量推理 | GPU 利用率大幅提升 |
+| 扁平数组树 | `mcts/flat_tree.py`，预分配 numpy 数组替代 Python 对象 | 节点创建 212μs → ~5μs（40×） |
+| 共享内存并行 MCTS | `training/parallel_mcts.py`，CPU 多核遍历树 + GPU 集中评估，轮次同步 | 512 局 105.9s → 15.3s |
+| 大模型 DDP | 62.7M 模型用 4 卡 DDP（小模型 12.5M 时多卡反而慢 4.5×） | 每轮数据量 4× |
+
+**共享内存轮次同步**是核心：所有 worker 按"轮"推进——每轮各自遍历树一步、把叶位置写入共享内存、递增 ready_count；主进程等所有 worker 就绪后一次批量 GPU 评估、写回结果、递增 gen。相比队列方案（序列化开销大、worker 去同步化导致 GPU 小批量），共享内存零序列化且保持 GPU 大批量。
+
+### Web 对弈界面
+
+新增 `gomonova/web/`：
+- **后端**（`server.py`，FastAPI）：无状态 API。`/api/play` 从完整落子历史重建棋盘 → 人类落子禁手判负 → AI 纯推理落子 → AI 禁手判负 → 返回 AI 落子 + top-3 备选 + 形势评估 + 胜利连线。`/api/hint` 返回当前局面 top-3。
+- **前端**（`index.html`，单文件 Canvas）：程序化石板棋盘、光泽棋子（径向渐变+高光）、落子动画（easeOutBack）、最后一手脉冲光圈、形势评估条、棋谱记录、AI 备选点虚线标记。
+
+```bash
+python -m gomonova.web.server --checkpoint checkpoints/best.pt --port 8000
+```
+
+### Checkpoint 自动写回（断点续训保障）
+
+开发机随时可能过期（SLURM 作业结束）。`scripts/sync_checkpoints.sh` 用 `setsid` 后台运行，每 10 分钟把开发机 `/tmp/gomonova/checkpoints/` 的 `best.pt`（scp 到 .tmp 再 mv，**原子写入**避免半截文件）和 `model_*.pt` 拉回本机。配合 checkpoint 断点续训（pipeline 自动从 best.pt 的 iteration 恢复），训练可跨多次机器切换无缝衔接。
+
+> 经验：开发机的 `/tmp` 在机器回收时**有时保留有时清空**（同一台机器重启后 `/tmp` 可能还在）。最可靠的持久存储是本机，故自动写回目标是本机 `checkpoints/`。
+
+### 训练完成
+
+完整训练 3000 轮，三相：
+
+| 阶段 | 迭代 | 内容 |
+|------|------|------|
+| ① 热身 | 0–300 | 纯策略，自由规则 |
+| ② 主力 | 300–2400 | MCTS（25 sims / 前 5 手），自由规则 |
+| ③ 禁手 | 2400–3000 | MCTS，连珠规则 |
+
+损失从 **5.97 降至 1.93**（策略 0.78 / 价值 0.65）。模型达到业余强手水平：开局符合天元规则，具备禁手意识，会进攻防守做杀。训练跨越多次开发机切换，靠自动写回 + 断点续训衔接。
+
+### 技术报告
+
+新增 `docs/technical_report/`（8 章 + 导读，面向 PyTorch 初学者、无 RL 背景）：
+01 项目概述 · 02 游戏引擎 · 03 神经网络 · 04 自博弈与 MCTS（RL 扫盲）· 05 训练管线（调参经验）· 06 性能优化（实战）· 07 推理与界面 · 08 总结。每章含「本章你将学到」、类比、ASCII 图示、代码片段、「动手实验」。

@@ -1,16 +1,27 @@
 # GomoNova
 
-从零训练的五子棋（连珠规则）AI。完全基于游戏规则通过自我对弈学习，不使用任何棋谱数据，对战时纯模型推理（无搜索）。
+从零训练的五子棋（连珠规则）AI。完全基于游戏规则，通过**自我对弈 + MCTS 引导训练**学习，不使用任何棋谱数据、不借用开源模型结构、不加载预训练权重。**对战时纯模型推理（无搜索）**——训练时用 MCTS 生成高质量学习目标，把搜索能力蒸馏进网络，对战时一次前向推理即可落子。
+
+> 详细实现原理见 [`docs/technical_report/`](docs/technical_report/README.md)（面向 PyTorch 初学者、无强化学习背景）。
 
 ## 快速开始：和 AI 对战
 
 ### 1. 安装依赖
 
 ```bash
-pip install torch numpy pyyaml rich click
+pip install torch numpy pyyaml rich click fastapi uvicorn
 ```
 
-### 2. 启动对战
+### 2a. Web 对战（推荐）
+
+```bash
+python -m gomonova.web.server --checkpoint checkpoints/best.pt --port 8000
+# 浏览器打开 http://localhost:8000
+```
+
+图形化棋盘、落子动画、形势评估条、棋谱记录、AI 备选点展示。
+
+### 2b. 命令行对战
 
 ```bash
 python -m gomonova.cli.play --checkpoint checkpoints/best.pt
@@ -40,10 +51,14 @@ python -m gomonova.cli.play --checkpoint checkpoints/best.pt
 ## 训练
 
 ```bash
+# 单 GPU
 python scripts/train.py --config configs/train_main.yaml
+
+# 4 GPU DDP（推荐）
+torchrun --nproc_per_node=4 scripts/train.py --config configs/train_main.yaml
 ```
 
-训练配置见 `configs/` 目录。训练过程自动保存 checkpoint 到 `checkpoints/best.pt`。
+训练分三相：纯策略热身（0–300）→ MCTS 引导 + 自由规则（300–2400）→ MCTS + 连珠规则学禁手（2400–3000）。配置见 `configs/`，过程自动保存 checkpoint 到 `checkpoints/best.pt`。开发机可能过期，用 `scripts/sync_checkpoints.sh` 定时把 checkpoint 写回本机，配合断点续训跨机器衔接。
 
 ## 测试
 
@@ -58,14 +73,16 @@ gomonova/
 ├── configs/          # 训练/推理配置
 ├── gomonova/
 │   ├── game/         # 棋盘、连珠规则（禁手）、对称变换
-│   ├── nn/           # MSAR-Net 网络（多尺度注意力残差）
-│   ├── training/     # 自博弈、训练器、评估器、管线
+│   ├── nn/           # MSAR-Net 网络（多尺度注意力残差）、损失函数
+│   ├── mcts/         # MCTS（训练用）：对象版节点、扁平数组树、搜索
+│   ├── training/     # 自博弈、共享内存并行 MCTS、回放、训练器、评估器、管线
 │   ├── inference/    # 纯前向推理（无搜索）
 │   ├── cli/          # curses 交互式对战
+│   ├── web/          # FastAPI 后端 + Canvas 前端对弈
 │   └── utils/        # 配置加载、checkpoint
-├── scripts/          # 训练入口、同步脚本
+├── scripts/          # 训练入口、超参搜索、checkpoint 定时写回
 ├── tests/            # 单元测试
-└── docs/             # 开发日志
+└── docs/             # 开发日志、技术报告（technical_report/）
 ```
 
 ## 规则说明
