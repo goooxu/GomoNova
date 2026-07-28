@@ -40,6 +40,38 @@ def _check_winner_freestyle(board: Board, pos: int) -> int | None:
     return None
 
 
+def candidate_moves(board: Board, apply_forbidden: bool) -> np.ndarray:
+    """Empty cells within distance-2 of any stone (standard gomoku MCTS pruning).
+
+    Restricting candidates to the neighbourhood of existing stones drastically
+    cuts opening branching, so MCTS concentrates its simulations on plausible
+    moves instead of spreading them over all 225 cells — which otherwise lets a
+    weak policy prior trap the search on far-away edge/corner moves.  Falls back
+    to all legal moves on an empty board or if pruning leaves nothing.
+    """
+    moves = board.legal_moves()
+    occupied = np.argwhere(board.cells != 0)
+    if len(occupied) == 0:
+        candidates = moves
+    else:
+        cand: set[int] = set()
+        for r, c in occupied:
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    nr, nc = r + dr, c + dc
+                    if (0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE
+                            and board.cells[nr, nc] == 0):
+                        cand.add(nr * BOARD_SIZE + nc)
+        candidates = np.array(sorted(cand), dtype=np.int64)
+    if apply_forbidden:
+        candidates = np.array(
+            [m for m in candidates if is_legal(board, int(m))], dtype=np.int64
+        )
+    if len(candidates) == 0:
+        return moves
+    return candidates
+
+
 class MCTSSearch:
     def __init__(
         self,
@@ -72,28 +104,8 @@ class MCTSSearch:
         return policy, v
 
     def _get_legal_actions(self, board: Board) -> np.ndarray:
-        moves = board.legal_moves()
-        if self.use_renju and board.current == BLACK:
-            occupied = np.argwhere(board.cells != 0)
-            if len(occupied) > 0:
-                candidate_set: set[int] = set()
-                for r, c in occupied:
-                    for dr in range(-2, 3):
-                        for dc in range(-2, 3):
-                            nr, nc = r + dr, c + dc
-                            if (0 <= nr < BOARD_SIZE and 0 <= nc < BOARD_SIZE
-                                    and board.cells[nr, nc] == 0):
-                                candidate_set.add(nr * BOARD_SIZE + nc)
-                candidates = np.array(sorted(candidate_set), dtype=np.int64)
-            else:
-                candidates = moves
-            legal = np.array(
-                [m for m in candidates if is_legal(board, int(m))], dtype=np.int64
-            )
-            if len(legal) == 0:
-                return moves
-            return legal
-        return moves
+        apply_forbidden = self.use_renju and board.current == BLACK
+        return candidate_moves(board, apply_forbidden)
 
     def _check_winner(self, board: Board, pos: int) -> int | None:
         if self.use_renju:
@@ -118,11 +130,9 @@ class MCTSSearch:
                 sim_board.play(node.action)
                 winner = self._check_winner(sim_board, node.action)
                 if winner is not None:
-                    if sim_board.current == BLACK:
-                        value = -1.0
-                    else:
-                        value = 1.0
-                    node.backup(value)
+                    # 终局节点轮走方=输家，negamax 价值恒为 -1（与 backup「先加后翻」
+                    # 及 best_child 取 -q 的约定一致；旧实现按黑/白胜给异号是错的）。
+                    node.backup(-1.0)
                     break
                 if sim_board.is_full():
                     node.backup(0.0)
@@ -174,7 +184,7 @@ class MCTSSearch:
             roots.append(root)
 
         for _ in range(self.num_simulations):
-            expand_info: list[tuple[int, MCTSNode, Board]] = []
+            expand_info: list[tuple[int, MCTSNode, np.ndarray, np.ndarray]] = []
 
             for i in range(n):
                 node = roots[i]
@@ -188,8 +198,7 @@ class MCTSSearch:
                     moves_played.append(node.action)
                     winner = self._check_winner(board, node.action)
                     if winner is not None:
-                        value = -1.0 if board.current == BLACK else 1.0
-                        node.backup(value)
+                        node.backup(-1.0)   # 终局轮走方=输家，negamax 价值恒 -1
                         terminal = True
                         break
                     if board.is_full():
@@ -197,23 +206,27 @@ class MCTSSearch:
                         terminal = True
                         break
 
+                expand_this = (not terminal) and (not node.is_expanded)
+                if expand_this:
+                    # undo 之前捕获叶子局面（planes + 合法动作）：undo 后 board 回到
+                    # 根局面，评估它会让所有叶子拿到同一个根价值，MCTS 失去叶估值信号。
+                    leaf_planes = board_to_planes(board)
+                    leaf_legal = self._get_legal_actions(board)
+
                 for _ in moves_played:
                     board.undo()
 
-                if not terminal and not node.is_expanded:
-                    expand_info.append((i, node, board))
+                if expand_this:
+                    expand_info.append((i, node, leaf_planes, leaf_legal))
 
             if expand_info:
-                planes = np.stack([
-                    board_to_planes(b) for _, _, b in expand_info
-                ])
+                planes = np.stack([lp for _, _, lp, _ in expand_info])
                 x = torch.from_numpy(planes).to(device=self.device, dtype=dtype)
                 logits, values = self.network(x)
                 policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
                 vals = values.float().squeeze(-1).cpu().numpy()
 
-                for j, (i, node, board) in enumerate(expand_info):
-                    legal = self._get_legal_actions(board)
+                for j, (i, node, _lp, legal) in enumerate(expand_info):
                     if len(legal) == 0:
                         node.backup(0.0)
                     else:
@@ -247,7 +260,7 @@ class MCTSSearch:
                 trees[i].add_dirichlet(0, self.dirichlet_alpha, self.dirichlet_epsilon)
 
         for _ in range(self.num_simulations):
-            expand_info: list[tuple[int, int, Board]] = []
+            expand_info: list[tuple[int, int, np.ndarray, np.ndarray, list[int]]] = []
 
             for i in range(n):
                 tree = trees[i]
@@ -262,8 +275,7 @@ class MCTSSearch:
                     slots.append(slot)
                     winner = self._check_winner(board, action)
                     if winner is not None:
-                        value = -1.0 if board.current == BLACK else 1.0
-                        tree.backup(slots, value)
+                        tree.backup(slots, -1.0)   # 终局轮走方=输家，价值恒 -1
                         terminal = True
                         break
                     if board.is_full():
@@ -272,27 +284,33 @@ class MCTSSearch:
                         break
                     node = tree.alloc_node()
 
+                if not terminal:
+                    # undo 之前捕获叶子局面（planes + 合法动作）：undo 后 board 回到
+                    # 根局面，评估它会让所有叶子拿到同一个根价值，MCTS 失去叶估值信号。
+                    leaf_planes = board_to_planes(board)
+                    leaf_legal = self._get_legal_actions(board)
+                else:
+                    leaf_planes = leaf_legal = None
+
                 for _ in slots:
                     board.undo()
 
                 if not terminal:
-                    expand_info.append((i, node, board))
+                    expand_info.append((i, node, leaf_planes, leaf_legal, slots))
 
             if expand_info:
-                planes = np.stack([
-                    board_to_planes(b) for _, _, b in expand_info
-                ])
+                planes = np.stack([lp for _, _, lp, _, _ in expand_info])
                 x = torch.from_numpy(planes).to(device=self.device, dtype=dtype)
                 logits, values = self.network(x)
                 policies = torch.softmax(logits.float(), dim=1).cpu().numpy()
                 vals = values.float().squeeze(-1).cpu().numpy()
 
-                for j, (i, node, board) in enumerate(expand_info):
-                    legal = self._get_legal_actions(board)
+                for j, (i, node, _lp, legal, slots) in enumerate(expand_info):
                     if len(legal) == 0:
-                        trees[i].backup([node], 0.0)
+                        trees[i].backup(slots, 0.0)
                     else:
                         trees[i].expand_node(node, policies[j], legal)
-                        trees[i].backup([node], float(vals[j]))
+                        # 回传完整路径 slots（含进入叶子的边）。
+                        trees[i].backup(slots, float(vals[j]))
 
         return [trees[i].get_visit_distribution(1.0) for i in range(n)]

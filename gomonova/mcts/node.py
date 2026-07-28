@@ -33,7 +33,9 @@ class MCTSNode:
     def ucb_score(self, c_puct: float) -> float:
         parent_visits = self.parent.visit_count if self.parent else 1
         exploration = c_puct * self.prior * math.sqrt(parent_visits) / (1 + self.visit_count)
-        return self.q_value + exploration
+        # backup() 采用「先加后翻」，子节点 q_value 是子节点轮走方（即父节点玩家的
+        # 对手）的视角。父节点为自己选子，应最大化自己的价值 = -子节点 q_value。
+        return -self.q_value + exploration
 
     def best_child(self, c_puct: float) -> MCTSNode:
         return max(self.children.values(), key=lambda n: n.ucb_score(c_puct))

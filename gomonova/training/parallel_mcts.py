@@ -20,9 +20,9 @@ import numpy as np
 import torch
 
 from ..game.board import BLACK, Board
-from ..game.rules import check_winner_at, is_legal
+from ..game.rules import check_winner_at
 from ..mcts.flat_tree import FlatMCTSTree
-from ..mcts.search import _check_winner_freestyle
+from ..mcts.search import _check_winner_freestyle, candidate_moves
 from ..nn.encoder import INPUT_CHANNELS, board_to_planes
 
 _CELLS = 225
@@ -54,11 +54,8 @@ def _worker(
     check_win = check_winner_at if use_renju else _check_winner_freestyle
 
     def _legal(board: Board) -> np.ndarray:
-        moves = board.legal_moves()
-        if use_renju and board.current == BLACK:
-            leg = np.array([m for m in moves if is_legal(board, int(m))], dtype=np.int64)
-            return leg if len(leg) > 0 else moves
-        return moves
+        apply_forbidden = use_renju and board.current == BLACK
+        return candidate_moves(board, apply_forbidden)
 
     def _sync(round_gen: int) -> None:
         with ready_count.get_lock():
@@ -83,7 +80,8 @@ def _worker(
     # Simulations
     for sim in range(num_sims):
         rg = sim + 1
-        need: list[tuple[int, int]] = []
+        need: list[tuple[int, int, list[int]]] = []
+        leaf_legals: dict[int, np.ndarray] = {}
 
         for i in range(n):
             tree, board = trees[i], boards[i]
@@ -95,7 +93,7 @@ def _worker(
                 slots.append(slot)
                 w = check_win(board, action)
                 if w is not None:
-                    tree.backup(slots, -1.0 if board.current == BLACK else 1.0)
+                    tree.backup(slots, -1.0)   # 终局轮走方=输家，价值恒 -1
                     terminal = True
                     break
                 if board.is_full():
@@ -104,26 +102,32 @@ def _worker(
                     break
                 node = tree.alloc_node()
 
+            if not terminal:
+                # undo 之前捕获叶子局面：planes 写共享内存供主进程批量评估，合法动作
+                # 暂存（undo 后 board 回到根局面，不能再拿 boards[i] 算叶子的合法动作）。
+                planes[offset + i, :] = board_to_planes(board).ravel()
+                leaf_legals[i] = _legal(board)
+            else:
+                planes[offset + i, :] = 0.0  # dummy
+
             for _ in slots:
                 board.undo()
 
             if not terminal:
-                planes[offset + i, :] = board_to_planes(board).ravel()
-                need.append((i, node))
-            else:
-                planes[offset + i, :] = 0.0  # dummy
+                need.append((i, node, slots))
 
         _sync(rg)
 
-        for i, node in need:
+        for i, node, slots in need:
             pol = results[offset + i, :_CELLS].copy()
             val = float(results[offset + i, _CELLS])
-            leg = _legal(boards[i])
+            leg = leaf_legals[i]
             if len(leg) == 0:
-                trees[i].backup([node], 0.0)
+                trees[i].backup(slots, 0.0)
             else:
                 trees[i].expand_node(node, pol, leg)
-                trees[i].backup([node], val)
+                # 回传完整路径 slots（含进入叶子的最后一条边）。
+                trees[i].backup(slots, val)
 
     out_q.put((wid, [t.get_visit_distribution(1.0) for t in trees]))
 

@@ -14,28 +14,12 @@ from __future__ import annotations
 import numpy as np
 import torch
 
-from ..game.board import BLACK, WHITE, BOARD_SIZE, Board, pos_to_rc, rc_to_pos
+from ..game.board import BLACK, WHITE, BOARD_SIZE, Board, pos_to_rc
 from ..game.symmetry import NUM_TRANSFORMS, transform_board, transform_policy
 from ..mcts.search import MCTSSearch
 from ..nn.encoder import board_to_planes
 
 _DIRS = ((0, 1), (1, 0), (1, 1), (1, -1))
-
-TENGAN = rc_to_pos(7, 7)   # 天元 (H8)：连珠规则规定黑棋第一手必须下在这里
-
-
-def _open_game() -> tuple[Board, tuple]:
-    """Create a board with the Renju opening: Black plays tengen (center).
-
-    Returns the board (Black's first move already played, White to move) and
-    the opening record ``(planes, mcts_policy, move, player)`` for training.
-    The opening move is forced (mcts_policy=None), so it is learned via
-    outcome-weighted CE — reinforcing "first move = tengen" in every game.
-    """
-    board = Board()
-    planes = board_to_planes(board)   # empty board, Black to move
-    board.play(TENGAN)
-    return board, (planes, None, TENGAN, BLACK)
 
 
 def _check_winner_freestyle(board: Board, pos: int) -> int | None:
@@ -97,9 +81,8 @@ def play_games_fast(
         boards = []
         histories: list[list[tuple]] = []
         for _ in range(n):
-            board, opening = _open_game()
-            boards.append(board)
-            histories.append([opening])
+            boards.append(Board())
+            histories.append([])
         active = list(range(n))
 
         while active:
@@ -168,9 +151,8 @@ def play_games_with_mcts(
     boards = []
     histories: list[list[tuple]] = []
     for _ in range(num_games):
-        board, opening = _open_game()
-        boards.append(board)
-        histories.append([opening])
+        boards.append(Board())
+        histories.append([])
     results: list[float | None] = [None] * num_games
 
     # Phase A: batched MCTS moves

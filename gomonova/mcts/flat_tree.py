@@ -72,7 +72,9 @@ class FlatMCTSTree:
 
         q = np.where(vc > 0, tv / np.maximum(vc, 1), 0.0)
         u = c_puct * prior * sqrt_pv / (1.0 + vc)
-        best_i = int(np.argmax(q + u))
+        # backup() 「先加后翻」：子边 q 是子节点轮走方（父节点玩家的对手）的视角，
+        # 父节点为自己选子应最大化 -q（自己的价值）。
+        best_i = int(np.argmax(-q + u))
         return start + best_i, int(self.child_action[start + best_i])
 
     def backup(self, slots: list[int], value: float) -> None:
