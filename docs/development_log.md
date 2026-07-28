@@ -420,3 +420,42 @@ bug 1+4 叠加，完美解释了一切：价值头正确（从胜负结果学，
 ### 决策
 
 用户选择**从头重训**（旧权重开局已被毒化）+ **移除强制天元**（靠修复后的 MCTS 自举发现天元）。
+
+---
+
+## Web 热重载与开发环境加固
+
+### 堆叠布局下棋盘按宽度撑满（根因修复）
+
+**问题**：窄窗口（≤1020px）触发纵向堆叠布局后，棋盘被钉死在 300px，撑不满屏幕宽度。
+
+**根因**：堆叠布局下 `.app` 为 `height:auto`，`.board-zone` 高度由内容决定，而内容（画布）尺寸又取决于 `resize()` 里 `min(宽, 高)` 取到的高度——循环依赖导致高度塌陷，`min` 取到塌陷值，再被 `Math.max(300, avail)` 下限钉死成 300px。横向布局（`.app` 为 `height:100vh`）高度定义良好，不受影响。
+
+**修复**（`web/index.html` 的 `resize()`）：用 `matchMedia('(max-width: 1020px)')` 判定堆叠态，堆叠时只按 `zone.clientWidth` 取尺寸；横向时仍取宽高较小者。
+
+> 经验：此前曾未诊断根因就草率放大棋盘（已回滚，见 commit 4394fe3）。这次先定位「高度塌陷 + 300px 下限」的确切机制再改，改动只有一处并附根因注释。
+
+### 试玩程序自动跟随最新模型（热重载）
+
+**问题**：web 服务启动时只加载一次 `best.pt`，训练持续更新磁盘上的权重，运行中的进程不会重读——试玩对的是启动那一刻的旧模型。
+
+**修复**（`web/server.py`）：新增 `_maybe_reload()`，在每次 `/api/play`、`/api/hint` 前检查 `best.pt` 的 mtime，变新就原地 `load_checkpoint` 重载权重并重建 player，无需重启进程。
+
+- **对半截文件安全**：`torch.load` 先整体读文件再 `load_state_dict`，写到一半的文件会在触碰权重前就抛错；此时保留旧权重、不更新 mtime，下次请求自动重试。
+- **可观测**：重载事件 `print(..., flush=True)` 实时落盘（stdout 重定向到文件时默认块缓冲，不 flush 看不到）。
+- **实测**：日志出现 `[hot-reload] reloaded checkpoints/best.pt`，由真实训练写盘触发，证明「训练写盘 → 下一手请求自动跟上」链路跑通。
+
+### 容器重建导致训练/Web 双双崩溃（排查 + 永久修复）
+
+**现象**：训练在 iter 576 后突然全 rank exitcode 1；重启 web 报 `ModuleNotFoundError: No module named 'fastapi'`。
+
+**根因**：开发机容器 `gomonova_web` 被重建（基础镜像 `nvcr.io/nvidia/pytorch:26.06-py3` 不带 web 依赖，且 `gomonova` 从未 `pip install -e .`），重建后手动装的依赖全丢：
+
+| 症状 | 根因 | 临时修复 |
+|------|------|----------|
+| 训练 `ModuleNotFoundError: No module named 'gomonova'` | `torchrun scripts/train.py` 把 `scripts/`（非 cwd）加进 sys.path，包又没装 | 启动命令显式 `PYTHONPATH=/workspace/gomonova` |
+| Web `ModuleNotFoundError: No module named 'fastapi'` | 基础镜像不含 fastapi/uvicorn，重建后手动安装丢失 | 容器内 `pip install fastapi uvicorn` |
+
+**永久修复**：仓库新增 `Dockerfile`（+ `.dockerignore`），在基础镜像上 `pip install -r requirements.txt` 并 `pip install -e .`，把 gomonova 装成 editable、web 依赖固化进镜像。以后重建直接用自定义镜像，`import gomonova` 不再依赖 cwd/PYTHONPATH，也不再需要手动装依赖。
+
+> 经验：开发机容器随时可能重建，任何「手动 pip install」都是易失的。可靠做法是把依赖固化进镜像（Dockerfile）或写进启动脚本。

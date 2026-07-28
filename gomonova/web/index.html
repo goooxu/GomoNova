@@ -416,7 +416,12 @@ function makeBoardTexture(px) {
 // ---------- geometry ----------
 function resize() {
   const zone = document.querySelector('.board-zone');
-  const avail = Math.min(zone.clientWidth, zone.clientHeight) - 24;
+  // 纵向堆叠布局（≤1020px，.app 为 height:auto）下 zone 高度由内容决定，与画布
+  // 尺寸循环依赖而塌陷，min(宽,高) 会取到塌陷高度、被 300px 下限钉死撑不满宽，
+  // 故此时按宽度取；横向布局（.app 为 height:100vh）高度定义良好，仍取宽高较小者。
+  const stacked = window.matchMedia('(max-width: 1020px)').matches;
+  const limit = stacked ? zone.clientWidth : Math.min(zone.clientWidth, zone.clientHeight);
+  const avail = limit - 24;
   const px = Math.max(300, avail);
   const dpr = window.devicePixelRatio || 1;
   canvas.width = px * dpr; canvas.height = px * dpr;

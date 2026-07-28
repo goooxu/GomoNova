@@ -1,0 +1,8 @@
+.git
+.qwen
+__pycache__
+*.pyc
+*.log
+checkpoints
+data
+docs

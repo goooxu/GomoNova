@@ -33,6 +33,36 @@ app = FastAPI(title="GomoNova Web")
 # ---- globals filled at startup ----
 _player: InferencePlayer | None = None
 _device: torch.device | None = None
+_network: GomoNovaNet | None = None
+_ckpt_path: str | None = None
+_ckpt_mtime: float = 0.0
+
+
+def _maybe_reload() -> None:
+    """Reload weights if the checkpoint on disk is newer than what we hold.
+
+    Training rewrites best.pt periodically; this lets a long-running server
+    track the latest model without a process restart.  A partially written
+    file fails torch.load before any weight is touched, so on failure we keep
+    the current weights and retry on the next request.
+    """
+    global _player, _ckpt_mtime
+    if _network is None or _ckpt_path is None:
+        return
+    try:
+        mtime = os.path.getmtime(_ckpt_path)
+    except OSError:
+        return
+    if mtime <= _ckpt_mtime:
+        return
+    try:
+        load_checkpoint(_ckpt_path, _network, _device)
+        _network.eval()
+        _player = InferencePlayer(_network, _device, temperature=0.0)
+        _ckpt_mtime = mtime
+        print(f"[hot-reload] reloaded {_ckpt_path}", flush=True)
+    except Exception as e:
+        print(f"[hot-reload] skipped ({e}); keeping current weights", flush=True)
 
 
 def _winning_line(board: Board, pos: int) -> list[int]:
@@ -122,6 +152,7 @@ def _ai_turn(board: Board, human_color: int) -> dict:
 
 @app.post("/api/play")
 def play(req: PlayRequest) -> dict:
+    _maybe_reload()
     board = _rebuild(req.moves)
     human_color = req.human_color
 
@@ -150,6 +181,7 @@ def play(req: PlayRequest) -> dict:
 
 @app.post("/api/hint")
 def hint(req: HintRequest) -> dict:
+    _maybe_reload()
     board = _rebuild(req.moves)
     policy = _player.get_policy(board)
     top_k = [
@@ -167,7 +199,7 @@ def index() -> FileResponse:
 
 
 def main() -> None:
-    global _player, _device
+    global _player, _device, _network, _ckpt_path, _ckpt_mtime
 
     parser = argparse.ArgumentParser(description="GomoNova web server")
     parser.add_argument("--config", default="configs/inference.yaml")
@@ -184,20 +216,22 @@ def main() -> None:
 
     cfg = load_config(args.config)
     m = cfg["model"]
-    network = GomoNovaNet(
+    _network = GomoNovaNet(
         channels=m["channels"],
         num_blocks=m["num_blocks"],
         policy_channels=m["policy_channels"],
         value_channels=m["value_channels"],
     ).bfloat16().to(_device)
-    for mod in network.modules():
+    for mod in _network.modules():
         if isinstance(mod, (torch.nn.BatchNorm2d, torch.nn.BatchNorm1d)):
             mod.float()
-    load_checkpoint(args.checkpoint, network, _device)
-    network.eval()
+    _ckpt_path = args.checkpoint
+    _ckpt_mtime = os.path.getmtime(_ckpt_path)
+    load_checkpoint(_ckpt_path, _network, _device)
+    _network.eval()
 
-    _player = InferencePlayer(network, _device, temperature=0.0)
-    print(f"Model loaded from {args.checkpoint} on {_device}")
+    _player = InferencePlayer(_network, _device, temperature=0.0)
+    print(f"Model loaded from {_ckpt_path} on {_device} (hot-reload enabled)")
     print(f"Open http://localhost:{args.port} in your browser")
 
     import uvicorn
