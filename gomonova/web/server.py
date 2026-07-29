@@ -36,6 +36,7 @@ _device: torch.device | None = None
 _network: GomoNovaNet | None = None
 _ckpt_path: str | None = None
 _ckpt_mtime: float = 0.0
+_iteration: int = 0
 
 
 def _maybe_reload() -> None:
@@ -46,7 +47,7 @@ def _maybe_reload() -> None:
     file fails torch.load before any weight is touched, so on failure we keep
     the current weights and retry on the next request.
     """
-    global _player, _ckpt_mtime
+    global _player, _ckpt_mtime, _iteration
     if _network is None or _ckpt_path is None:
         return
     try:
@@ -56,11 +57,11 @@ def _maybe_reload() -> None:
     if mtime <= _ckpt_mtime:
         return
     try:
-        load_checkpoint(_ckpt_path, _network, _device)
+        _iteration = load_checkpoint(_ckpt_path, _network, _device)
         _network.eval()
         _player = InferencePlayer(_network, _device, temperature=0.0)
         _ckpt_mtime = mtime
-        print(f"[hot-reload] reloaded {_ckpt_path}", flush=True)
+        print(f"[hot-reload] reloaded {_ckpt_path} (iter {_iteration})", flush=True)
     except Exception as e:
         print(f"[hot-reload] skipped ({e}); keeping current weights", flush=True)
 
@@ -120,6 +121,7 @@ def _result(
         "black_value": black_value,
         "top_k": top_k or [],
         "win_line": win_line or [],
+        "iteration": _iteration,
     }
 
 
@@ -189,7 +191,21 @@ def hint(req: HintRequest) -> dict:
         for i in np.argsort(policy)[::-1][:3]
         if policy[i] > 0
     ]
-    return {"top_k": top_k}
+    return {"top_k": top_k, "iteration": _iteration}
+
+
+@app.get("/api/status")
+def status() -> dict:
+    """Lightweight probe for the frontend to show the live model iteration.
+
+    Also nudges the hot-reload check, so a page left open keeps both its
+    displayed iteration and its loaded weights in step with training.
+    """
+    _maybe_reload()
+    return {
+        "iteration": _iteration,
+        "checkpoint": os.path.basename(_ckpt_path or ""),
+    }
 
 
 @app.get("/")
@@ -199,7 +215,7 @@ def index() -> FileResponse:
 
 
 def main() -> None:
-    global _player, _device, _network, _ckpt_path, _ckpt_mtime
+    global _player, _device, _network, _ckpt_path, _ckpt_mtime, _iteration
 
     parser = argparse.ArgumentParser(description="GomoNova web server")
     parser.add_argument("--config", default="configs/inference.yaml")
@@ -227,11 +243,11 @@ def main() -> None:
             mod.float()
     _ckpt_path = args.checkpoint
     _ckpt_mtime = os.path.getmtime(_ckpt_path)
-    load_checkpoint(_ckpt_path, _network, _device)
+    _iteration = load_checkpoint(_ckpt_path, _network, _device)
     _network.eval()
 
     _player = InferencePlayer(_network, _device, temperature=0.0)
-    print(f"Model loaded from {_ckpt_path} on {_device} (hot-reload enabled)")
+    print(f"Model loaded from {_ckpt_path} on {_device} (iter {_iteration}, hot-reload enabled)")
     print(f"Open http://localhost:{args.port} in your browser")
 
     import uvicorn

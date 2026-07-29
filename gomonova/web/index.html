@@ -144,6 +144,35 @@
   }
   .brand .tag b { color: var(--amber); font-weight: 700; }
 
+  /* live model iteration badge */
+  .model-badge {
+    margin-left: auto; flex: none;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 3px;
+    padding: 7px 12px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: rgba(53, 208, 181, 0.06);
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .model-badge .mb-lbl {
+    font-size: 9px; letter-spacing: 2px; color: var(--ink-faint);
+    text-transform: uppercase; white-space: nowrap;
+  }
+  .model-badge .mb-val {
+    font-family: var(--mono); font-size: 18px; font-weight: 600;
+    color: var(--teal); line-height: 1;
+  }
+  .model-badge.bump {
+    border-color: rgba(53, 208, 181, 0.6);
+    box-shadow: 0 0 0 1px rgba(53,208,181,0.25), 0 0 22px rgba(53,208,181,0.18);
+    animation: mb-bump 0.9s ease;
+  }
+  @keyframes mb-bump {
+    0% { transform: scale(1); }
+    35% { transform: scale(1.14); }
+    100% { transform: scale(1); }
+  }
+
   /* players */
   .players { display: flex; flex-direction: column; gap: 8px; }
   .player {
@@ -314,6 +343,10 @@
         <h1>连珠对弈</h1>
         <div class="tag">Gomo<b>Nova</b> &middot; Renju AI</div>
       </div>
+      <div class="model-badge" id="modelBadge" title="当前对弈权重的训练迭代数（随训练自动更新）">
+        <span class="mb-lbl">模型迭代</span>
+        <span class="mb-val" id="modelIter">—</span>
+      </div>
     </div>
 
     <div class="card players">
@@ -389,6 +422,7 @@ let placedAt = {};
 let aiAlternatives = {};   // moveIndex -> [[pos, prob], [pos, prob]] (2nd & 3rd choices)
 let boardTex = null;
 let geom = { cell: 0, off: 0, px: 0 };
+let modelIter = null;      // iteration of the weights currently serving moves
 
 // ---------- board texture (modern slate) ----------
 function makeBoardTexture(px) {
@@ -655,6 +689,19 @@ function updateGauge(blackValue) {
   txt.textContent = (blackValue >= 0 ? '黑 +' : '白 +') + Math.abs(blackValue).toFixed(2);
 }
 
+function updateModelIter(it) {
+  if (it === null || it === undefined || it === modelIter) return;
+  const upgraded = modelIter !== null;   // pulse only on a genuine upgrade, not first paint
+  modelIter = it;
+  document.getElementById('modelIter').textContent = it;
+  if (upgraded) {
+    const badge = document.getElementById('modelBadge');
+    badge.classList.remove('bump');
+    void badge.offsetWidth;              // force reflow to restart the animation
+    badge.classList.add('bump');
+  }
+}
+
 function updateHistory() {
   const el = document.getElementById('history');
   el.innerHTML = '';
@@ -707,6 +754,17 @@ async function apiHint() {
   });
   return res.json();
 }
+async function apiStatus() {
+  const res = await fetch('/api/status');
+  return res.json();
+}
+
+// Keep the displayed iteration (and, via the server's hot-reload check, the
+// loaded weights) in step with training even while the page sits idle.
+async function pollStatus() {
+  try { updateModelIter((await apiStatus()).iteration); } catch (e) { /* server busy, retry next tick */ }
+}
+setInterval(pollStatus, 15000);
 
 function applyResult(data) {
   const prevLen = moves.length;
@@ -726,6 +784,7 @@ function applyResult(data) {
   forbiddenPos = data.forbidden_pos;
   hints = [];
   thinking = false;
+  updateModelIter(data.iteration);
   updateGauge(data.black_value);
   updateHistory();
   updatePlayers();
@@ -775,7 +834,9 @@ document.getElementById('btnUndo').addEventListener('click', () => {
 });
 document.getElementById('btnHint').addEventListener('click', async () => {
   if (status !== 'playing' || thinking || !humanTurn()) return;
-  hints = (await apiHint()).top_k;
+  const r = await apiHint();
+  hints = r.top_k;
+  updateModelIter(r.iteration);
 });
 document.getElementById('btnResign').addEventListener('click', () => {
   if (status !== 'playing') return;
@@ -801,6 +862,7 @@ window.addEventListener('resize', resize);
 resize();
 requestAnimationFrame(loop);
 newGame();
+pollStatus();
 </script>
 </body>
 </html>

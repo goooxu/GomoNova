@@ -459,3 +459,13 @@ bug 1+4 叠加，完美解释了一切：价值头正确（从胜负结果学，
 **永久修复**：仓库新增 `Dockerfile`（+ `.dockerignore`），在基础镜像上 `pip install -r requirements.txt` 并 `pip install -e .`，把 gomonova 装成 editable、web 依赖固化进镜像。以后重建直接用自定义镜像，`import gomonova` 不再依赖 cwd/PYTHONPATH，也不再需要手动装依赖。
 
 > 经验：开发机容器随时可能重建，任何「手动 pip install」都是易失的。可靠做法是把依赖固化进镜像（Dockerfile）或写进启动脚本。
+
+### 在 Web 上显示当前模型迭代数
+
+**需求**：试玩时想直观看到自己对的是第几轮训练的权重，便于观察训练进度。
+
+**实现**：
+- 后端（`server.py`）：checkpoint 本就存着 `iteration`、`load_checkpoint` 会返回，此前被忽略。现接住存入全局 `_iteration`，在启动与热重载时更新；新增轻量 `/api/status` 端点返回 `{iteration, checkpoint}`（顺带触发热重载检查），并把 `iteration` 加进 `/api/play`、`/api/hint` 响应。
+- 前端（`index.html`）：品牌卡右侧加「模型迭代」徽章；每 15 秒轮询 `/api/status` 实时刷新——页面挂着不动也能看迭代数随训练爬升；落子/提示时也从响应即时更新；迭代数变大（热重载拉到新权重）时徽章脉冲提示「模型升级」。
+
+**效果**：`/api/status` 返回 `{"iteration":734,"checkpoint":"best.pt"}`，徽章实时显示并随训练自动增长。
